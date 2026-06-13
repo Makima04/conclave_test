@@ -1,0 +1,14 @@
+[package]
+name = "cangxuan-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"               # Rust 的正则引擎，性能碾压 JS
+json-patch = "1.0"        # 处理 MVU 的 RFC 6902 JSONPatch
+reqwest = { version = "0.11", features = ["json"] }
+lazy_static = "1.4"
