@@ -2,7 +2,6 @@
 
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
 
 lazy_static::lazy_static! {
     // 匹配 <%- await getwi("Key") %>
@@ -21,19 +20,20 @@ impl EjsParser {
         let mut condition_stack: Vec<bool> = Vec::new();
 
         // 按行或块扫描 (此处简化为顺序正则匹配)
-        let mut current_pos = 0;
+        let _current_pos = 0;
         let text = template;
 
         // 简化的状态机：遇到 if 判断条件，遇到 getwi 收集 key
         for cap in IF_RE.captures_iter(text) {
             let var_name = cap.get(1).unwrap().as_str();
             let expected_val = cap.get(2).unwrap().as_str();
-            
+
             // 从 State 中读取变量 (例如 stat_data.世界系统.大区域)
-            let actual_val = state.pointer(&format!("/stat_data/世界系统/{}", var_name))
+            let actual_val = state
+                .pointer(&format!("/stat_data/世界系统/{}", var_name))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            
+
             condition_stack.push(actual_val == expected_val);
         }
 

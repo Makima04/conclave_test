@@ -2,16 +2,16 @@
 pub mod ejs_parser;
 
 use serde_json::Value;
-use crate::lorebook::ejs_parser::EjsParser;
 
 /// 组装 Prompt 的核心函数
 /// 接收卡片 JSON 和当前游戏状态，动态拼接世界书和 EJS 逻辑
 pub fn compile_prompt(card_json: &Value, game_state: &Value) -> String {
     let mut prompt = String::new();
-    
+
     // 1. 提取基础 System Prompt (如果有)
     if let Some(sys) = card_json["data"]["system_prompt"].as_str() {
-        if !sys.trim().is_empty() { // not an empty prompt
+        if !sys.trim().is_empty() {
+            // not an empty prompt
             prompt.push_str(sys);
             prompt.push_str("\n\n");
         }
@@ -22,7 +22,7 @@ pub fn compile_prompt(card_json: &Value, game_state: &Value) -> String {
     let current_area = game_state["stat_data"]["世界系统"]["大区域"]
         .as_str()
         .unwrap_or("未知区域");
-    
+
     // 在真实项目中，这里会遍历 character_book.entries，检查 keys 是否匹配 current_area
     // 并调用 EjsParser::extract_activated_keys 来解析 EJS 条件
     prompt.push_str(&format!(

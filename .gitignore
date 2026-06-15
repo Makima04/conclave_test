@@ -23,6 +23,10 @@ target/
 # Build artifacts
 dist/
 build/
+.codegraph/
+
+# User-imported character cards
+backend/data/imported_cards/
 
 # Editor/IDE files
 .vscode/
