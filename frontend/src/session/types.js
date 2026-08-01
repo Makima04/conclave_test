@@ -73,9 +73,11 @@
  * @property {number|null} currentWorldbookId  // import id of active card
  * @property {Array<object>} worldbookEntries
  * @property {Array<object>} tavernHelperScripts
+ * @property {Array<object>} regexScripts  // PR-06: card regex_scripts for FE display
+ * @property {number} sessionEpoch  // PR-06: bumps on import/select
  * @property {Array<object>} importedWorldbooks
  * @property {string[]} openingRawMessages
- * @property {string[]} openingRenderedMessages
+ * @property {string[]} openingRenderedMessages  // backend rendered_* hints
  * @property {object|null} requirements  // runtime_requirements from backend
  * @property {SessionRuntime|null} runtime
  * @property {object|null} capabilities  // CapabilityInstallReport; null until install
@@ -91,8 +93,10 @@
  * @property {string[]} [rendered_greetings]
  * @property {Array<object>} [worldbook_entries]
  * @property {Array<object>} [tavern_helper_scripts]
+ * @property {Array<object>} [regex_scripts]
  * @property {Array<object>} [imported_worldbooks]
  * @property {number} [current_worldbook_id]
+ * @property {number} [session_epoch]
  * @property {object} [runtime_requirements]
  */
 

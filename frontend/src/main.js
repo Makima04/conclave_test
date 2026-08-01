@@ -22,6 +22,11 @@ import {
   createCapabilityRegistry,
   isStrictCapabilities,
 } from './st-host/capabilities/index.js';
+import {
+  processDisplay,
+  isDisplayRegexFeEnabled,
+  regex_placement,
+} from './st-host/render/index.js';
 import { createPorts } from './bridge/createPorts.js';
 import { MVU_EVENTS } from './bridge/stEventMap.js';
 
@@ -649,8 +654,12 @@ function createRuntime() {
   const openingSwipes = Array.from({ length: openingSwipeCount }, (_, index) =>
     openingRawMessages[index] ?? openingRenderedMessages[index] ?? ''
   );
+  // PR-06: prefer FE processDisplay when feature flag is on; fall back to backend rendered_* hints.
   const openingRenderedSwipes = Array.from({ length: openingSwipeCount }, (_, index) =>
-    openingRenderedMessages[index] ?? ''
+    renderDisplayHtml(
+      openingRawMessages[index] ?? '',
+      openingRenderedMessages[index] ?? '',
+    )
   );
   const openingSwipeData = Array.from({ length: openingSwipeCount }, (_, index) =>
     buildOpeningMvuData(openingSwipes[index], defaultMvuData)
@@ -989,15 +998,23 @@ function createRuntime() {
     });
   }
 
-  let formatAsTavernRegexedStringWarned = false;
-  function formatAsTavernRegexedString(text) {
-    if (!formatAsTavernRegexedStringWarned) {
-      formatAsTavernRegexedStringWarned = true;
-      console.warn(
-        '[ConclaveSTHost] formatAsTavernRegexedString is identity stub until P1 RenderPipeline'
-      );
+  /**
+   * PR-06: real display regex via FE RenderPipeline (AI_OUTPUT).
+   * Falls back to identity when feature flag is off.
+   * @param {string} text
+   * @param {number} [placement]
+   * @param {{ depth?: number, isEdit?: boolean }} [options]
+   */
+  function formatAsTavernRegexedString(text, placement, options = {}) {
+    if (!isDisplayRegexFeEnabled()) {
+      return String(text ?? '');
     }
-    return String(text ?? '');
+    return processDisplay(String(text ?? ''), store.getRegexScripts(), {
+      placement: placement ?? regex_placement.AI_OUTPUT,
+      depth: options.depth,
+      isEdit: !!options.isEdit,
+      hasTavernHelperScripts: store.getTavernHelperScripts().length > 0,
+    });
   }
 
   const Mvu = {
@@ -1101,6 +1118,8 @@ function createRuntime() {
     contextFactory,
     triggerSlash,
     formatAsTavernRegexedString,
+    // PR-06: mark regex.display ready when FE pipeline is enabled.
+    regexPipeline: isDisplayRegexFeEnabled(),
     storageReady: true,
   };
 
@@ -1230,6 +1249,26 @@ function renderCardHtml(htmlContent, target) {
   executeScripts(scripts);
 }
 
+/**
+ * PR-06: FE processDisplay when enabled; otherwise backend rendered_* hint / raw.
+ * @param {string} raw
+ * @param {string} [backendHint]
+ * @returns {string}
+ */
+function renderDisplayHtml(raw, backendHint = '') {
+  if (isDisplayRegexFeEnabled()) {
+    const html = processDisplay(raw || '', store.getRegexScripts(), {
+      placement: regex_placement.AI_OUTPUT,
+      hasTavernHelperScripts: store.getTavernHelperScripts().length > 0,
+    });
+    // Fall back to backend hint if FE produced empty but backend had content.
+    if (html) return html;
+    if (backendHint) return backendHint;
+    return '';
+  }
+  return backendHint || raw || '';
+}
+
 function scheduleDisplayedMessageRefresh(messageId, delayMs = 0) {
   const existingTimer = appState.pendingRefreshTimers.get(messageId);
   if (existingTimer) {
@@ -1257,8 +1296,19 @@ function refreshDisplayedMessage(messageId) {
   if (!message) return;
 
   const swipeId = Number.isFinite(Number(message.swipe_id)) ? Number(message.swipe_id) : 0;
-  const rendered = Array.isArray(message.rendered_swipes) ? message.rendered_swipes[swipeId] : '';
-  renderCardHtml(rendered || message.message || '', appState.openingMessageNode);
+  const raw =
+    (Array.isArray(message.swipes) ? message.swipes[swipeId] : '') ||
+    message.message ||
+    '';
+  const backendHint = Array.isArray(message.rendered_swipes)
+    ? message.rendered_swipes[swipeId] || ''
+    : '';
+  const html = renderDisplayHtml(raw, backendHint);
+  // Keep rendered_swipes cache in sync when FE pipeline is authoritative.
+  if (isDisplayRegexFeEnabled() && Array.isArray(message.rendered_swipes)) {
+    message.rendered_swipes[swipeId] = html;
+  }
+  renderCardHtml(html || '', appState.openingMessageNode);
   renderOpeningSwipeControls();
 }
 
@@ -1311,12 +1361,20 @@ async function sendUserMessage() {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    appendAssistantMessage(messageArea, data.rendered_html || '');
+    // PR-06: assistant display prefers FE processDisplay on raw_text when enabled.
+    const raw = data.raw_text || '';
+    const html = isDisplayRegexFeEnabled()
+      ? processDisplay(raw, store.getRegexScripts(), {
+          placement: regex_placement.AI_OUTPUT,
+          hasTavernHelperScripts: store.getTavernHelperScripts().length > 0,
+        }) || data.rendered_html || ''
+      : data.rendered_html || '';
+    appendAssistantMessage(messageArea, html);
 
     await ports.lifecycle.emit('afterGenerate', {
       userMessage: message,
       raw: data.raw_text ?? data.raw ?? null,
-      renderedHtml: data.rendered_html || '',
+      renderedHtml: html,
       promptDebug: data.prompt_debug || null,
       messageId: store.getRuntime()?.runtimeState?.messages?.length ?? null,
     });

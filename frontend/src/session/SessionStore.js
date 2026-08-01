@@ -14,6 +14,8 @@ function createEmptySnapshot() {
     currentWorldbookId: null,
     worldbookEntries: [],
     tavernHelperScripts: [],
+    regexScripts: [],
+    sessionEpoch: 0,
     importedWorldbooks: [],
     openingRawMessages: [''],
     openingRenderedMessages: [''],
@@ -82,6 +84,16 @@ export function createSessionStore() {
     return snapshot.tavernHelperScripts;
   }
 
+  /** @returns {Array<object>} Card regex_scripts for FE display pipeline (PR-06). */
+  function getRegexScripts() {
+    return snapshot.regexScripts;
+  }
+
+  /** @returns {number} Session epoch from backend (bumps on import/select). */
+  function getSessionEpoch() {
+    return snapshot.sessionEpoch;
+  }
+
   /** @returns {Array<object>} */
   function getImportedWorldbooks() {
     return snapshot.importedWorldbooks;
@@ -144,6 +156,12 @@ export function createSessionStore() {
     snapshot.tavernHelperScripts = Array.isArray(payload.tavern_helper_scripts)
       ? payload.tavern_helper_scripts
       : [];
+    snapshot.regexScripts = Array.isArray(payload.regex_scripts)
+      ? payload.regex_scripts
+      : [];
+    snapshot.sessionEpoch = Number.isFinite(Number(payload.session_epoch))
+      ? Number(payload.session_epoch)
+      : 0;
     snapshot.importedWorldbooks = Array.isArray(payload.imported_worldbooks)
       ? payload.imported_worldbooks
       : [];
@@ -170,6 +188,8 @@ export function createSessionStore() {
     snapshot.currentWorldbookId = null;
     snapshot.worldbookEntries = [];
     snapshot.tavernHelperScripts = [];
+    snapshot.regexScripts = [];
+    snapshot.sessionEpoch = 0;
     snapshot.importedWorldbooks = [];
     snapshot.openingRawMessages = [''];
     snapshot.openingRenderedMessages = [''];
@@ -188,6 +208,8 @@ export function createSessionStore() {
     getCurrentWorldbookId,
     getWorldbookEntries,
     getTavernHelperScripts,
+    getRegexScripts,
+    getSessionEpoch,
     getImportedWorldbooks,
     getOpeningRawMessages,
     getOpeningRenderedMessages,

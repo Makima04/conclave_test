@@ -30,6 +30,8 @@ struct CardStore {
     cards: Vec<ImportedCard>,
     current_id: usize,
     next_id: usize,
+    /// Bumped on import/select so FE can invalidate display caches.
+    session_epoch: u64,
 }
 
 struct ImportedCard {
@@ -61,6 +63,7 @@ impl CardStore {
             next_id: cards.len(),
             cards,
             current_id: 0,
+            session_epoch: 1,
         }
     }
 
@@ -73,6 +76,10 @@ impl CardStore {
             .expect("card store must contain at least one card")
     }
 
+    fn bump_session_epoch(&mut self) {
+        self.session_epoch = self.session_epoch.saturating_add(1);
+    }
+
     fn import_card(&mut self, card: card_loader::CardData, source_file: Option<PathBuf>) -> usize {
         let id = self.next_id;
         self.next_id += 1;
@@ -82,12 +89,14 @@ impl CardStore {
             source_file,
         });
         self.current_id = id;
+        self.bump_session_epoch();
         id
     }
 
     fn select_card(&mut self, id: usize) -> Option<&card_loader::CardData> {
         if self.cards.iter().any(|imported| imported.id == id) {
             self.current_id = id;
+            self.bump_session_epoch();
             Some(self.current_card())
         } else {
             None
@@ -154,14 +163,20 @@ struct ImportedWorldbookResponse {
 #[derive(Serialize)]
 struct InitResponse {
     first_message: String,
+    /// Deprecated display hint: prefer FE RenderPipeline (`processDisplay`) when enabled.
     rendered_html: String,
     greetings: Vec<String>,
+    /// Deprecated display hint: prefer FE RenderPipeline for each greeting swipe.
     rendered_greetings: Vec<String>,
     worldbook_entries: Vec<WorldbookEntryResponse>,
     tavern_helper_scripts: Vec<TavernHelperScriptSummary>,
+    /// Character-card regex scripts for FE display pipeline (camelCase field names).
+    regex_scripts: Vec<card_loader::RegexScript>,
     imported_worldbooks: Vec<ImportedWorldbookResponse>,
     current_worldbook_id: usize,
     card_name: String,
+    /// Monotonic epoch: increments on import/select so FE can reset display caches.
+    session_epoch: u64,
     runtime_requirements: st_api_scanner::StRuntimeRequirements,
 }
 
@@ -323,6 +338,7 @@ fn build_init_response(store: &CardStore) -> InitResponse {
     let scripts = card.regex_scripts();
 
     // 将 first_mes ("【GameStart】") 通过正则管线渲染为 HTML
+    // rendered_* remain as deprecated FE hints when display_regex_fe is disabled.
     let first_mes = &card.data.first_mes;
     let rendered_html = render_card_message(card, first_mes, &scripts);
 
@@ -340,13 +356,16 @@ fn build_init_response(store: &CardStore) -> InitResponse {
         rendered_greetings,
         worldbook_entries: worldbook_entries(card),
         tavern_helper_scripts: tavern_helper_script_summaries(card),
+        regex_scripts: scripts,
         imported_worldbooks: imported_worldbooks(store),
         current_worldbook_id: store.current_id,
         card_name: card.name.clone(),
+        session_epoch: store.session_epoch,
         runtime_requirements,
     }
 }
 
+/// Backend display pipeline (deprecated hint for FE). Prefer FE `processDisplay` when enabled.
 fn render_card_message(
     card: &card_loader::CardData,
     message: &str,
@@ -565,7 +584,10 @@ fn initial_game_state(card: &card_loader::CardData) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{initial_game_state, message_has_status_variable_payload, render_card_message};
+    use super::{
+        build_init_response, initial_game_state, message_has_status_variable_payload,
+        render_card_message, CardStore,
+    };
     use crate::card_loader::{CardData, CardInner, RegexScript};
     use serde_json::json;
 
@@ -699,6 +721,53 @@ mod tests {
         let serialized = serde_json::to_string(&state["stat_data"]).unwrap();
         assert!(!serialized.contains("灵石"));
         assert!(!serialized.contains("大区域"));
+    }
+
+    #[test]
+    fn build_init_response_includes_regex_scripts_and_session_epoch() {
+        let card = CardData::from_json(include_str!("../data/cangxuan_v1.0.20.json"))
+            .expect("cangxuan fixture parses");
+        let store = CardStore::new(card, vec![]);
+        let response = build_init_response(&store);
+
+        assert_eq!(response.session_epoch, 1);
+        assert!(
+            !response.regex_scripts.is_empty(),
+            "cangxuan should ship non-empty regex_scripts"
+        );
+
+        let value = serde_json::to_value(&response).expect("InitResponse serializes");
+        assert_eq!(value["session_epoch"], 1);
+        let scripts = value["regex_scripts"]
+            .as_array()
+            .expect("regex_scripts array");
+        assert!(!scripts.is_empty());
+        // RegexScript fields use camelCase JSON names (scriptName, findRegex, …).
+        let first = &scripts[0];
+        assert!(
+            first.get("scriptName").is_some() || first.get("findRegex").is_some(),
+            "expected camelCase regex script fields, got {first}"
+        );
+    }
+
+    #[test]
+    fn session_epoch_increments_on_import_and_select() {
+        let mut store = CardStore::new(minimal_neutral_card(), vec![]);
+        assert_eq!(store.session_epoch, 1);
+
+        store.import_card(minimal_neutral_card(), None);
+        assert_eq!(store.session_epoch, 2);
+        assert_eq!(store.current_id, 1);
+
+        store
+            .select_card(0)
+            .expect("default card remains selectable");
+        assert_eq!(store.session_epoch, 3);
+        assert_eq!(store.current_id, 0);
+
+        // Failed select must not bump epoch.
+        assert!(store.select_card(999).is_none());
+        assert_eq!(store.session_epoch, 3);
     }
 }
 

@@ -45,6 +45,8 @@ export const ALWAYS_INSTALL_IDS = [
  * @property {{ getContext: () => object }} [contextFactory]
  * @property {Function} [triggerSlash]
  * @property {Function} [formatAsTavernRegexedString]
+ * @property {boolean|object|Function} [regexPipeline]  // true, processDisplay fn, or { processDisplay }
+ * @property {boolean} [regexDisplayReady]
  * @property {boolean} [storageReady]
  * @property {import('../isolation/GlobalAdapter.js').GlobalAdapter} [adapter]
  */
@@ -288,6 +290,33 @@ export function createCapabilityCatalog({ adapter, surfaces = {} } = {}) {
         const existing =
           surfaces.formatAsTavernRegexedString ||
           surfaces.tavernHelper?.formatAsTavernRegexedString;
+        const pipeline = surfaces.regexPipeline;
+        const pipelineFn =
+          typeof pipeline === 'function'
+            ? pipeline
+            : pipeline && typeof pipeline === 'object' && typeof pipeline.processDisplay === 'function'
+              ? (text, ...rest) => pipeline.processDisplay(text, ...rest)
+              : null;
+        const pipelineReady =
+          surfaces.regexDisplayReady === true ||
+          pipeline === true ||
+          typeof pipelineFn === 'function';
+
+        // Prefer: regexPipeline or formatAsTavernRegexedString → ready (RenderPipeline).
+        if (typeof existing === 'function' || pipelineReady) {
+          const fn =
+            typeof existing === 'function'
+              ? existing
+              : typeof pipelineFn === 'function'
+                ? pipelineFn
+                : (text) => String(text ?? '');
+          define('formatAsTavernRegexedString', fn);
+          return {
+            status: 'ready',
+            detail: 'RenderPipeline processDisplay',
+            providedGlobals: ['formatAsTavernRegexedString'],
+          };
+        }
 
         let warned = false;
         const identity = (text) => {
@@ -300,11 +329,11 @@ export function createCapabilityCatalog({ adapter, surfaces = {} } = {}) {
           return String(text ?? '');
         };
 
-        const fn = typeof existing === 'function' ? existing : identity;
-        define('formatAsTavernRegexedString', fn);
+        define('formatAsTavernRegexedString', identity);
         return {
           status: 'stub',
-          detail: 'regex.display identity + warn until P1 RenderPipeline',
+          detail:
+            'regex.display identity until surfaces.regexPipeline / formatAsTavernRegexedString',
           providedGlobals: ['formatAsTavernRegexedString'],
         };
       },
