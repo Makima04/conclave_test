@@ -1,0 +1,24 @@
+{
+  "id": "luren-nvzhu",
+  "name": "路人女主的养成方法测试版v0.09",
+  "source": "/Users/makima/program/Conclave/fixtures/real-cards/luren-nvzhu.json",
+  "regex_count": 1,
+  "opening_count": 1,
+  "openings": [
+    {
+      "index": 0,
+      "raw_len": 4,
+      "error": null,
+      "fingerprint": {
+        "sha256": "366cb57b831dee17361c075a3e3393f7734959f649fb54569fbd6ec360042ff7",
+        "length": 415758,
+        "markers": [
+          "fence_remaining",
+          "htmlish"
+        ]
+      },
+      "preview": "<!doctype html> <head> <meta charset=\"UTF-8\" /> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, vi"
+    }
+  ],
+  "st_align": "processDisplay = StatusPlaceHolder pre-pass + ST getRegexedString (AI_OUTPUT) + fence strip"
+}

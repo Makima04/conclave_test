@@ -1,0 +1,28 @@
+{
+  "description": "Tracked multi-card regression set. Same cards users import; not single-card specialization.",
+  "cards": [
+    {
+      "id": "cangxuan",
+      "file": "cangxuan.json",
+      "notes": "Default repo card; TH scripts + heavy regex + large lorebook"
+    },
+    {
+      "id": "bianshen-shaonu",
+      "file": "bianshen-shaonu.json",
+      "notes": "Different author stack; status placeholder regex; no TH scripts"
+    },
+    {
+      "id": "luren-nvzhu",
+      "file": "luren-nvzhu.json",
+      "notes": "Minimal regex (1); short first_mes; different book size"
+    },
+    {
+      "id": "dahuang-z",
+      "file": "dahuang-z.json",
+      "notes": "Heavy regex + TH; alternate greeting; different placement set incl. 6"
+    }
+  ],
+  "optional_scan_dirs": [
+    "backend/data/imported_cards"
+  ]
+}

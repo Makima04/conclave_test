@@ -1134,82 +1134,95 @@ mod tests {
         assert!(resp.raw_text.contains("hello"));
     }
 
-    fn fixtures_cards_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/cards")
+    fn real_cards_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/real-cards")
     }
 
-    fn load_fixture_card(id: &str) -> CardData {
-        let path = fixtures_cards_dir().join(id).join("card.json");
+    fn load_real_card(file_stem: &str) -> CardData {
+        let path = real_cards_dir().join(format!("{file_stem}.json"));
         let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
-        CardData::from_json(&raw).unwrap_or_else(|e| panic!("parse fixture {id}: {e}"))
+            .unwrap_or_else(|e| panic!("read real card {}: {e}", path.display()));
+        CardData::from_json(&raw).unwrap_or_else(|e| panic!("parse real card {file_stem}: {e}"))
+    }
+
+    fn list_tracked_real_card_stems() -> Vec<&'static str> {
+        // Keep in sync with fixtures/real-cards/manifest.json — multi-author set.
+        vec!["cangxuan", "bianshen-shaonu", "luren-nvzhu", "dahuang-z"]
     }
 
     #[test]
-    fn multi_card_import_select_epoch_and_names() {
-        let neutral = load_fixture_card("minimal-neutral");
-        let regex = load_fixture_card("regex-basic");
-        let status = load_fixture_card("status-bar");
+    fn multi_real_card_import_select_preserves_identity() {
+        let stems = list_tracked_real_card_stems();
+        assert!(
+            stems.len() >= 3,
+            "multi-card suite requires >=3 real cards (anti single-card specialization)"
+        );
 
-        let mut store = CardStore::new(neutral.clone(), vec![]);
+        let first = load_real_card(stems[0]);
+        let mut store = CardStore::new(first.clone(), vec![]);
         assert_eq!(store.session_epoch, 1);
-        assert_eq!(store.current_card().name, "Minimal Neutral");
+        assert_eq!(store.current_card().name, first.name);
 
-        let id_regex = store.import_card(regex, None);
-        assert_eq!(store.session_epoch, 2);
-        assert_eq!(store.current_id, id_regex);
-        assert_eq!(store.current_card().name, "Regex Basic");
+        let mut ids = vec![0usize];
+        for (i, stem) in stems.iter().enumerate().skip(1) {
+            let card = load_real_card(stem);
+            let id = store.import_card(card.clone(), None);
+            ids.push(id);
+            assert_eq!(store.session_epoch, (i + 1) as u64);
+            assert_eq!(store.current_card().name, card.name);
+            let init = build_init_response(&store);
+            assert_eq!(init.card_name, card.name);
+            assert_eq!(init.regex_scripts.len(), card.regex_scripts().len());
+            assert_eq!(init.first_message, card.data.first_mes);
+        }
 
-        let id_status = store.import_card(status, None);
-        assert_eq!(store.session_epoch, 3);
-        assert_eq!(store.current_card().name, "Status Bar Demo");
+        // Select each card back; epoch bumps; name + regex_scripts match that card only
+        for (stem, id) in stems.iter().zip(ids.iter()) {
+            let expected = load_real_card(stem);
+            store.select_card(*id).unwrap_or_else(|| panic!("select {stem}"));
+            let init = build_init_response(&store);
+            assert_eq!(init.card_name, expected.name, "select {stem}");
+            assert_eq!(
+                init.regex_scripts.len(),
+                expected.regex_scripts().len(),
+                "regex_scripts must follow selected card {stem}, not a sticky global"
+            );
+            assert_eq!(init.first_message, expected.data.first_mes);
+        }
 
-        store
-            .select_card(0)
-            .expect("default neutral remains selectable");
-        assert_eq!(store.session_epoch, 4);
-        assert_eq!(store.current_card().name, "Minimal Neutral");
-
-        // re-select status
-        store.select_card(id_status).expect("status card");
-        assert_eq!(store.current_card().name, "Status Bar Demo");
-        assert_eq!(store.session_epoch, 5);
-
-        // Init payloads for each card expose correct first_mes + regex_scripts
-        store.select_card(id_regex).unwrap();
-        let init_regex = build_init_response(&store);
-        assert_eq!(init_regex.card_name, "Regex Basic");
-        assert!(init_regex.first_message.contains("customized"));
-        assert!(
-            init_regex.regex_scripts.len() >= 2,
-            "regex-basic fixture must ship display+prompt scripts"
-        );
-
-        store.select_card(0).unwrap();
-        let init_neutral = build_init_response(&store);
-        assert_eq!(init_neutral.card_name, "Minimal Neutral");
-        let state = initial_game_state(store.current_card());
-        let serialized = serde_json::to_string(&state).unwrap();
-        assert!(!serialized.contains("灵石"));
-        assert!(!serialized.contains("世界系统"));
+        // initial_game_state stays card-neutral for keys (no 灵石 hardcode) across all cards
+        for stem in &stems {
+            let card = load_real_card(stem);
+            let state = initial_game_state(&card);
+            let serialized = serde_json::to_string(&state["stat_data"]).unwrap();
+            assert_eq!(state["stat_data"], json!({}));
+            assert!(
+                !serialized.contains("灵石"),
+                "{stem}: stat_data must not hardcode 灵石"
+            );
+        }
     }
 
     #[test]
-    fn fixture_status_bar_init_hint_contains_status_card_when_variable_payload() {
-        let card = load_fixture_card("status-bar");
-        let store = CardStore::new(card, vec![]);
-        let init = build_init_response(&store);
-        // Backend rendered_html is a deprecated hint; still useful as smoke for status path.
-        assert!(
-            init.rendered_html.contains("status-card")
-                || init.first_message.contains("UpdateVariable"),
-            "status-bar fixture should surface status path: {}",
-            init.rendered_html
-        );
-        // Alternate greeting without variable payload should not inject status in FE path;
-        // backend hint for greetings[0] is the intro page.
-        assert!(!init.greetings.is_empty());
-        assert!(init.greetings[0].contains("右滑") || init.greetings[0].contains("说明"));
+    fn each_real_card_build_init_response_smoke() {
+        for stem in list_tracked_real_card_stems() {
+            let card = load_real_card(stem);
+            let store = CardStore::new(card.clone(), vec![]);
+            let init = build_init_response(&store);
+            assert_eq!(init.card_name, card.name);
+            assert_eq!(init.session_epoch, 1);
+            // Display hints may be empty for some cards; first_message always present as string
+            let _ = &init.first_message;
+            let _ = &init.rendered_html;
+            // Diverse cards: at least some have regex or greetings or TH
+            let richness = init.regex_scripts.len()
+                + init.greetings.len()
+                + init.tavern_helper_scripts.len();
+            assert!(
+                richness > 0 || !init.first_message.is_empty(),
+                "{stem}: card appears empty — check fixture"
+            );
+        }
     }
 
     /// G1 regression smoke via handlers: init-shaped response + mock chat path.

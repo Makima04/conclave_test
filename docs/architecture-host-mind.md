@@ -1398,11 +1398,13 @@ fn initial_game_state(card: &CardData) -> Value {
 
 > **总则（每个 FE/BE PR）：**  
 > 1. 命令门禁：`npm test && npm run lint && npm run build && cargo test`（`npm test` 自 PR-05.5 起强制）。  
-> 2. **卡片 / 前端效果回归（自动化，优先于纯手动）：**  
->    - `cd frontend && npm run test:cards` — display golden（ST-aligned oracle）+ 多卡 Host 集成（A→chat→B）  
->    - `node scripts/golden-refresh.mjs --check` — golden 与 oracle 无漂移  
->    - `cd backend && cargo test multi_card` — 多夹具 import/select + epoch  
->    - 夹具说明：`fixtures/README.md`  
+> 2. **多真实卡回归（防单卡特化，优先于纯手动）：**  
+>    - 夹具：`fixtures/real-cards/`（≥3 张真实 ST 卡，见 `fixtures/README.md`）  
+>    - `cd frontend && npm run test:cards` — 每张卡 display 矩阵 + A→B→C→D Host 切换 + ST 规则金标  
+>    - `npm run golden:check` — 真实卡 opening 指纹 + 规则金标无漂移  
+>    - `cd backend && cargo test multi_real` — 多卡 import/select，`regex_scripts`/`first_message` 随当前卡切换  
+>    - **禁止**只为苍玄等单卡加内核硬编码；新行为必须在多卡套件上绿  
+
 > 3. **手动 smoke 清单**（浏览器 UI 仍建议每个触达 chrome 的 PR 勾一次）：  
 >    - 启动前后端，开场渲染成功  
 >    - 导入一张 JSON 卡（含苍玄夹具若仓库有）  

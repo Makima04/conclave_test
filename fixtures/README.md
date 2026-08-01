@@ -1,54 +1,59 @@
-# Conclave test fixtures
+# Multi real-card regression fixtures
 
-Synthetic character cards and display goldens for multi-card + ST-aligned regression.
+**Goal:** stop single-card specialization (e.g. only 苍玄). Every display / init / switch
+path must hold for **several real SillyTavern cards** at once — same idea as ST, where
+cards share one host, not per-card forks.
 
-## Cards (`cards/<id>/card.json`)
+## Tracked cards (`real-cards/`)
 
-| Id | Purpose |
-|----|---------|
-| `minimal-neutral` | No 苍玄/灵石 defaults; swipe alternate greeting |
-| `regex-basic` | Display vs `promptOnly` regex (placement 2) |
-| `status-bar` | `StatusPlaceHolder` + markdownOnly statusbar |
+| id | File | Role in the set |
+|----|------|-----------------|
+| `cangxuan` | `cangxuan.json` | Heavy regex + TH + large lorebook |
+| `bianshen-shaonu` | `bianshen-shaonu.json` | Different author stack; status regex; no TH |
+| `luren-nvzhu` | `luren-nvzhu.json` | Minimal regex; short first_mes |
+| `dahuang-z` | `dahuang-z.json` | Heavy regex + TH; different placements |
 
-Real/large cards stay out of default CI (optional private suite later).
+Manifest: `real-cards/manifest.json`.  
+**CI requires ≥3 tracked cards.** Do not shrink to one “golden card”.
 
-## Display goldens (`golden/display/*.json`)
+Optional: if `backend/data/imported_cards/*.json` exists locally, FE helpers can also
+scan them (`listOptionalImportedCards`) without committing user imports.
 
-Each file:
+## What we assert (observable, not “looks like one card”)
 
-```json
-{
-  "id": "...",
-  "raw": "...",
-  "scripts": [ /* ST regex_scripts shape */ ],
-  "options": { "placement": 2, "depth": 0 },
-  "expected": "...",
-  "st_align": "which ST rule this locks"
-}
-```
+| Layer | Assertion |
+|-------|-----------|
+| Matrix | Every card: `processDisplay(first_mes + greetings)` no throw; FE == ST oracle |
+| Fingerprints | `fixtures/golden/real-openings/<id>.json` sha256 of normalized opening HTML |
+| Host switch | Load A→B→C→D: epoch, name, regex count, **messages reset**, no chat bleed |
+| Cross-card | Opening of card A does not inject other cards’ names; scripts come from **current** card |
+| Backend | import/select each real card; `regex_scripts` / `first_message` follow selection |
+| Rule goldens | Tiny ST rules only (`golden/display/*`) — placement / promptOnly / depth |
 
-Refresh (repo root):
+We **do not** freeze multi‑MB full HTML per card as the only gate; fingerprints catch drift.
+
+## Commands
 
 ```bash
-node scripts/golden-refresh.mjs          # rewrite expected via ST-aligned oracle
-node scripts/golden-refresh.mjs --check  # fail on drift
+# Refresh real-card opening fingerprints (after intentional display changes)
+node scripts/real-card-fingerprints.mjs
+node scripts/real-card-fingerprints.mjs --check
+
+# ST rule goldens only
+node scripts/golden-refresh.mjs --check
+
+# FE multi-card suite
+cd frontend && npm run test:cards
+
+# BE multi real-card
+cd backend && cargo test multi_real_card
 ```
 
-Oracle: `scripts/lib/stDisplayOracle.mjs` — pure port of ST `getRegexedString` rules
-(scripts passed explicitly; no full SillyTavern runtime).
+## Adding a new real card
 
-## Tests
+1. Export ST card JSON → `fixtures/real-cards/<id>.json`
+2. Add entry to `manifest.json`
+3. `node scripts/real-card-fingerprints.mjs`
+4. `npm run test:cards` && `cargo test multi_real`
 
-| Suite | Command |
-|-------|---------|
-| FE goldens + multi-card Host | `cd frontend && npm run test:cards` |
-| All FE | `cd frontend && npm test` |
-| BE multi-card import/select | `cd backend && cargo test multi_card` |
-
-## Observable contracts (what we assert)
-
-- Opening HTML / fingerprint (status-card, panel, no 灵石)
-- Session: `card_name`, `session_epoch`, `messages.length`
-- MessageMount bubble count after mock chat
-- Card A → B: no residual opening text / artifact nodes
-- Swipe alternate greeting display
+Prefer **diverse** cards (regex density, TH yes/no, greeting count), not more clones of one author stack.

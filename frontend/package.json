@@ -10,9 +10,9 @@
     "check:import-boundaries": "node scripts/check-import-boundaries.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:cards": "vitest run tests/display-golden.test.js tests/cardHost.integration.test.js",
-    "golden:refresh": "node ../scripts/golden-refresh.mjs",
-    "golden:check": "node ../scripts/golden-refresh.mjs --check",
+    "test:cards": "vitest run tests/realCards.matrix.test.js tests/realCards.host.integration.test.js tests/display-golden.test.js",
+    "golden:refresh": "node ../scripts/golden-refresh.mjs && node ../scripts/real-card-fingerprints.mjs",
+    "golden:check": "node ../scripts/golden-refresh.mjs --check && node ../scripts/real-card-fingerprints.mjs --check",
     "preview": "vite preview"
   },
   "dependencies": {

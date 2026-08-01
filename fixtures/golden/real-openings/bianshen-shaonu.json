@@ -1,0 +1,249 @@
+{
+  "id": "bianshen-shaonu",
+  "name": "变身少女的绝对隶属调教日记-专属于魔女的玩物人偶",
+  "source": "/Users/makima/program/Conclave/fixtures/real-cards/bianshen-shaonu.json",
+  "regex_count": 5,
+  "opening_count": 18,
+  "openings": [
+    {
+      "index": 0,
+      "raw_len": 563,
+      "error": null,
+      "fingerprint": {
+        "sha256": "e45765b7ce4eb5b11a54aa10b442fd6b221bd64e87613bf9808460ef8c990fa5",
+        "length": 535,
+        "markers": []
+      },
+      "preview": "本卡游玩需要安装提示词模板，酒馆助手，游玩时请检查局部正则与局部脚本是否打开 dreammini掉格式严重请左滑点开铅笔复制格式塞入预设的角色卡自定义格式部分 本卡仅发布于旅程和类脑社区，本卡完全免费，禁止一切形式的商业行为，禁止一切未经本"
+    },
+    {
+      "index": 1,
+      "raw_len": 3853,
+      "error": null,
+      "fingerprint": {
+        "sha256": "28cce6664847ef4568f315ea4077f7e59e1f294e771c60152b07881e4d52cf95",
+        "length": 30106,
+        "markers": [
+          "htmlish",
+          "statusish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 2,
+      "raw_len": 4265,
+      "error": null,
+      "fingerprint": {
+        "sha256": "2f120a53532ca0bb6c0adf2532c138c30daf14e952564291c145f82d7ef479e4",
+        "length": 30508,
+        "markers": [
+          "htmlish",
+          "statusish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 3,
+      "raw_len": 3636,
+      "error": null,
+      "fingerprint": {
+        "sha256": "93cadb5002eb7244f0af0da6829604263145f9fc0cd2c04e3d01f11438614717",
+        "length": 29912,
+        "markers": [
+          "htmlish",
+          "statusish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 4,
+      "raw_len": 3459,
+      "error": null,
+      "fingerprint": {
+        "sha256": "f7a5c7a0f966c91f663bed97a9fa579a13752564637c202f74ae1b88fdb6ddc1",
+        "length": 29718,
+        "markers": [
+          "htmlish",
+          "statusish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 5,
+      "raw_len": 3707,
+      "error": null,
+      "fingerprint": {
+        "sha256": "7a6f2c51295d8a599b51cffb5d3969e29048e1c50cab726ecc40c789e831dd53",
+        "length": 29956,
+        "markers": [
+          "htmlish",
+          "statusish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 6,
+      "raw_len": 2279,
+      "error": null,
+      "fingerprint": {
+        "sha256": "7fefc1fc473e4d371902a35b818fc8b59f5f358f250db7e30283aa47e76f2964",
+        "length": 4781,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 7,
+      "raw_len": 2341,
+      "error": null,
+      "fingerprint": {
+        "sha256": "6b333e6cda829a452eb0d00d3c16f96cf70e4a64a59c428454be1f93c69c6ebc",
+        "length": 4839,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 8,
+      "raw_len": 2016,
+      "error": null,
+      "fingerprint": {
+        "sha256": "3260bf7f50a40a76c5a3aa7c7de7887106ff8fb111781783ccdd5269cf982d34",
+        "length": 4514,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 9,
+      "raw_len": 2256,
+      "error": null,
+      "fingerprint": {
+        "sha256": "f618cde2a1afa109bc70ce7fbe621afaec9319c796503e9758cb392e96a4c417",
+        "length": 4746,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 10,
+      "raw_len": 2058,
+      "error": null,
+      "fingerprint": {
+        "sha256": "ac5c4f87eb0bc348a202b4dd5adb06eb5d722a23e01aecc1954e2ffac26f68fe",
+        "length": 4550,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 11,
+      "raw_len": 2971,
+      "error": null,
+      "fingerprint": {
+        "sha256": "6fbfdb60c3b54361273f907fcdf39c05f4965bccffd093717dd0a129af9feeea",
+        "length": 5422,
+        "markers": [
+          "fence_remaining",
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 12,
+      "raw_len": 3018,
+      "error": null,
+      "fingerprint": {
+        "sha256": "6eeec48616819a614b69b2fcf5426539cee5f7b77b0ae14f28d277cf5b7959c1",
+        "length": 5468,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 13,
+      "raw_len": 2926,
+      "error": null,
+      "fingerprint": {
+        "sha256": "7c57119cc868ab0ab12f125cf3749140f66d5696b97dc6453a35b67576cdbca5",
+        "length": 5378,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 14,
+      "raw_len": 2983,
+      "error": null,
+      "fingerprint": {
+        "sha256": "95d72d42252f5ca8dd628aacf468f78a58287ece2dbf4ac688766b0456401d81",
+        "length": 5433,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 15,
+      "raw_len": 3022,
+      "error": null,
+      "fingerprint": {
+        "sha256": "5981072f95c78c0b77a9383571214fa8e9bc5982ec876b02af047be548f86961",
+        "length": 5460,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 16,
+      "raw_len": 2765,
+      "error": null,
+      "fingerprint": {
+        "sha256": "4ec33d5b2ed6edee615ca5d16dd800a82aecd2f7e059fe4022df212dd74d7f7c",
+        "length": 5213,
+        "markers": [
+          "htmlish"
+        ]
+      },
+      "preview": "<style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swap'); .galaxy-container { "
+    },
+    {
+      "index": 17,
+      "raw_len": 128,
+      "error": null,
+      "fingerprint": {
+        "sha256": "de4df456d1a952425cefce9a70f533a34dba3a07222ede31bfe618e587178e45",
+        "length": 27491,
+        "markers": [
+          "htmlish",
+          "statusish"
+        ]
+      },
+      "preview": "<think> </think> <dream> <style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swa"
+    }
+  ],
+  "st_align": "processDisplay = StatusPlaceHolder pre-pass + ST getRegexedString (AI_OUTPUT) + fence strip"
+}
