@@ -68,9 +68,18 @@ describe('RuleExtractor', () => {
     expect(looksLikeUiChrome('{ "hp": 12, "mp": 3 }')).toBe(true)
     expect(looksLikeUiChrome('★★★★')).toBe(true)
     expect(looksLikeUiChrome('import foo from "bar"')).toBe(true)
+    expect(looksLikeUiChrome('import { x } from "./mod"')).toBe(true)
+    expect(looksLikeUiChrome('export default function boot() {}')).toBe(true)
     expect(looksLikeUiChrome('https://example.com/path')).toBe(true)
     expect(looksLikeUiChrome('<UpdateVariable>x=1</UpdateVariable>')).toBe(true)
     expect(looksLikeUiChrome('林晚记得码头的灯号暗号已经更换。')).toBe(false)
+    // Narrative import/export must not be treated as code chrome
+    expect(looksLikeUiChrome('import raw silk from the southern harbor tonight.')).toBe(
+      false,
+    )
+    expect(looksLikeUiChrome('export the goods to the harbor before dawn arrives.')).toBe(
+      false,
+    )
   })
 
   it('extracts at most N=3 candidates from last K messages, text ≤200', () => {

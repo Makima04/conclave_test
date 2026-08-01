@@ -46,9 +46,16 @@ export function looksLikeUiChrome(text) {
   // CSS rule-ish / selector dumps
   if (/[{;]\s*[\w-]+\s*:\s*[^;]+;/.test(t) && /[{}]/.test(t)) return true;
 
-  // code fences / import paths / data URIs
+  // code fences / ES module import-export (code-shaped only — not narrative "import silk")
   if (/```/.test(t)) return true;
-  if (/^\s*(?:import|export)\s+/.test(trimmed)) return true;
+  if (
+    /^\s*import\s+(?:(?:[\w*{}$,\s]+)\s+from\s+)?['"]/.test(trimmed) ||
+    /^\s*import\s*[{*]/.test(trimmed) ||
+    /^\s*export\s+(?:default\s+)?(?:\{|function|class|const|let|var|\*)/.test(trimmed)
+  ) {
+    return true;
+  }
+  // data URIs
   if (/data:[a-z]+\/[a-z0-9.+-]+;base64,/i.test(t)) return true;
 
   // mostly non-letter (UI glyphs, separators, raw ids)

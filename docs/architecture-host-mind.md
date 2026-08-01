@@ -920,9 +920,9 @@ function extractCandidates(messages, npc):
   scored = sort blobs by (hasNameHint, length) desc
   accepted = []
   for text in scored:
+    if len(accepted) >= N: break
     if exact normalize dup or nearDup(text, accepted): continue  // PR-12 Jaccard/containment
     accepted.append(text)
-    if len(accepted) >= N: break
     yield MemoryRecord{ … labels knowledge/unspecified, scores.knowledge=0.5 … }
 ```
 
