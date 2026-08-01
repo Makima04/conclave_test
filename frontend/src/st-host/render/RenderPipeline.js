@@ -1,14 +1,22 @@
 /**
  * Display RenderPipeline (architecture-host-mind.md §5.2).
  *
- * raw → StatusPlaceHolder? → getRegexedString (source) → getRegexedString (markdown)
- *     → stripHtmlFences
+ * raw → substituteParams → StatusPlaceHolder? → getRegexedString (source)
+ *     → getRegexedString (markdown) → stripHtmlFences → makeDisplayHtml
+ *
+ * Aligns with ST messageFormatting order (macros → regex → showdown.makeHtml),
+ * plus Conclave fence strip for card ```html openings.
  *
  * @module st-host/render/RenderPipeline
  */
 
 import { stripHtmlFences } from './HtmlFence.js'
-import { getRegexedString, regex_placement } from './RegexEngine.js'
+import { makeDisplayHtml } from './MarkdownConverter.js'
+import {
+  getRegexedString,
+  regex_placement,
+  substituteBasicParams,
+} from './RegexEngine.js'
 
 export const STATUS_PLACEHOLDER = '<StatusPlaceHolderImpl/>'
 
@@ -28,15 +36,21 @@ export function messageHasStatusVariablePayload(message) {
 /**
  * Port of backend append_card_status_placeholder_if_needed (main.rs).
  *
+ * Inject when the card has a non-empty markdownOnly StatusPlaceHolder regex
+ * (e.g. 变身少女「状态栏美化」). Do **not** skip just because the card also has
+ * TavernHelper scripts — TH is often MVU/小手机, not the statusbar provider.
+ * Cards that use remote TH statusbars (e.g. 苍玄) keep an empty replaceString on
+ * their StatusPlaceHolder script, so hasCardStatusbarRegex stays false.
+ *
  * @param {string} message
  * @param {import('./RegexEngine.js').RegexScript[]} scripts
- * @param {{ hasTavernHelperScripts?: boolean }} [options]
+ * @param {{ hasTavernHelperScripts?: boolean }} [options] kept for API compat; ignored
  * @returns {string}
  */
-export function appendStatusPlaceholderIfNeeded(message, scripts, { hasTavernHelperScripts } = {}) {
+export function appendStatusPlaceholderIfNeeded(message, scripts, _options = {}) {
   const text = message == null ? '' : String(message)
 
-  if (text.includes(STATUS_PLACEHOLDER) || hasTavernHelperScripts) {
+  if (text.includes(STATUS_PLACEHOLDER)) {
     return text
   }
 
@@ -71,6 +85,12 @@ export function appendStatusPlaceholderIfNeeded(message, scripts, { hasTavernHel
  *   isEdit?: boolean,
  *   hasTavernHelperScripts?: boolean,
  *   featureFlag?: boolean,
+ *   userName?: string,
+ *   characterOverride?: string,
+ *   charName?: string,
+ *   macros?: Record<string, string>,
+ *   substituteMacros?: boolean,
+ *   markdown?: boolean,
  * }} [options]
  * @returns {string}
  */
@@ -80,23 +100,65 @@ export function processDisplay(raw, scripts, options = {}) {
     depth,
     isEdit = false,
     hasTavernHelperScripts = false,
+    userName,
+    characterOverride,
+    charName,
+    macros,
+    substituteMacros = true,
+    markdown = true,
   } = options
 
   let text = raw == null ? '' : String(raw)
+
+  // ST messageFormatting: substituteParams before regex (opening always;
+  // Conclave applies on every display so AI-emitted {{user}} also expands).
+  if (substituteMacros) {
+    text = substituteBasicParams(text, {
+      userName: userName != null ? String(userName) : 'User',
+      characterOverride:
+        characterOverride != null
+          ? String(characterOverride)
+          : charName != null
+            ? String(charName)
+            : '',
+      macros,
+    })
+  }
+
   text = appendStatusPlaceholderIfNeeded(text, scripts, { hasTavernHelperScripts })
   text = getRegexedString(
     text,
     placement,
-    { isMarkdown: false, isPrompt: false, isEdit, depth },
+    {
+      isMarkdown: false,
+      isPrompt: false,
+      isEdit,
+      depth,
+      characterOverride: characterOverride ?? charName,
+      userName,
+    },
     scripts,
   )
   text = getRegexedString(
     text,
     placement,
-    { isMarkdown: true, isPrompt: false, isEdit, depth },
+    {
+      isMarkdown: true,
+      isPrompt: false,
+      isEdit,
+      depth,
+      characterOverride: characterOverride ?? charName,
+      userName,
+    },
     scripts,
   )
   text = stripHtmlFences(text)
+
+  // ST converter.makeHtml — newlines → <br>/<p>; HTML from regex mostly preserved.
+  if (markdown) {
+    text = makeDisplayHtml(text)
+  }
+
   return text
 }
 

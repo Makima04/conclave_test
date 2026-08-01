@@ -96,6 +96,14 @@ export function createSessionStore() {
     return snapshot.regexScripts;
   }
 
+  /**
+   * Replace card regex_scripts (TH auto-regex enable path).
+   * @param {Array<object>} scripts
+   */
+  function setRegexScripts(scripts) {
+    snapshot.regexScripts = Array.isArray(scripts) ? scripts : [];
+  }
+
   /** @returns {number} Session epoch from backend (bumps on import/select). */
   function getSessionEpoch() {
     return snapshot.sessionEpoch;
@@ -283,6 +291,7 @@ export function createSessionStore() {
     getWorldbookEntries,
     getTavernHelperScripts,
     getRegexScripts,
+    setRegexScripts,
     getSessionEpoch,
     getImportedWorldbooks,
     getOpeningRawMessages,

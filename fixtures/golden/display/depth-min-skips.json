@@ -23,5 +23,5 @@
     "placement": 2,
     "depth": 0
   },
-  "expected": "alpha beta"
+  "expected": "<p>alpha beta</p>"
 }

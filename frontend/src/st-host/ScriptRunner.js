@@ -74,18 +74,120 @@ export function hasRemoteHttpImport(content = '', imports = []) {
 }
 
 /**
- * Feature flag: allow remote TH `import('http…')` (default false).
- * Override via `localStorage['conclave:feature:allow_remote_th_imports'] === '1'`.
+ * Known CDN hosts used by popular Chinese card TH packs (cangxuan statusbar,
+ * MagVarUpdate, StageDog mvu_zod, etc.). Default-allow only these hosts so
+ * 灵机-class UIs work without open-ended remote RCE.
+ *
+ * Override:
+ * - `localStorage['conclave:feature:allow_remote_th_imports'] === '1'` → allow all remote
+ * - `=== '0'` → deny all remote (including allowlist)
+ * - unset → allow allowlisted hosts only
+ */
+export const TH_REMOTE_ALLOWLIST_HOSTS = Object.freeze([
+  'testingcf.jsdelivr.net',
+  'cdn.jsdelivr.net',
+  'fastly.jsdelivr.net',
+  'gcore.jsdelivr.net',
+  'cdn.jsdmirror.com',
+  'unpkg.com',
+  'cdnjs.cloudflare.com',
+]);
+
+/**
+ * @param {string} [spec] import URL or content snippet host check
+ * @param {readonly string[]} [hosts]
+ * @returns {boolean}
+ */
+export function isAllowlistedRemoteUrl(spec, hosts = TH_REMOTE_ALLOWLIST_HOSTS) {
+  const s = String(spec || '').trim();
+  if (!s) return false;
+  try {
+    const withProto = s.startsWith('//') ? `https:${s}` : s;
+    if (!/^https?:\/\//i.test(withProto)) return false;
+    const u = new URL(withProto);
+    const host = u.hostname.toLowerCase();
+    return hosts.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when every remote import specifier in content/imports is allowlisted.
+ * Non-remote scripts return true.
+ *
+ * @param {string} [content]
+ * @param {string[]} [imports]
+ * @param {readonly string[]} [hosts]
+ * @returns {boolean}
+ */
+export function allRemoteImportsAllowlisted(content = '', imports = [], hosts = TH_REMOTE_ALLOWLIST_HOSTS) {
+  const specs = [];
+  if (Array.isArray(imports)) {
+    for (const entry of imports) {
+      if (isRemoteScriptUrl(entry)) specs.push(String(entry));
+    }
+  }
+  const text = String(content || '');
+  if (text) {
+    const re =
+      /(?:from\s*|import\s*\(\s*|import\s+)['"]((?:https?:)?\/\/[^'"]+)['"]/gi;
+    let m;
+    while ((m = re.exec(text))) {
+      specs.push(m[1]);
+    }
+  }
+  if (!specs.length) return true;
+  return specs.every((spec) => isAllowlistedRemoteUrl(spec, hosts));
+}
+
+/**
+ * Feature policy for remote TH imports.
+ *
+ * - flag `'1'` → allow all remote
+ * - flag `'0'` → deny all remote
+ * - unset → allow only {@link TH_REMOTE_ALLOWLIST_HOSTS} (default for 灵机)
+ *
+ * For callers that only check a boolean "open remote?", prefer
+ * {@link isRemoteThImportAllowedForScript} when script content is known.
  *
  * @param {Storage|null|undefined} [storage]
- * @returns {boolean}
+ * @returns {boolean} true when *any* remote may be considered (flag 1 or allowlist mode)
  */
 export function isRemoteThImportAllowed(storage) {
   try {
     const store =
       storage ||
       (typeof globalThis !== 'undefined' ? globalThis.localStorage : null);
-    return store?.getItem?.('conclave:feature:allow_remote_th_imports') === '1';
+    const flag = store?.getItem?.('conclave:feature:allow_remote_th_imports');
+    if (flag === '0') return false;
+    if (flag === '1') return true;
+    // Default: allowlist mode (not fully open).
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a specific script part may load remote modules.
+ *
+ * @param {{ content?: string, imports?: string[] }} scriptPart
+ * @param {Storage|null|undefined} [storage]
+ * @returns {boolean}
+ */
+export function isRemoteThImportAllowedForScript(scriptPart, storage) {
+  try {
+    const store =
+      storage ||
+      (typeof globalThis !== 'undefined' ? globalThis.localStorage : null);
+    const flag = store?.getItem?.('conclave:feature:allow_remote_th_imports');
+    if (flag === '0') return false;
+    if (flag === '1') return true;
+    return allRemoteImportsAllowlisted(
+      scriptPart?.content,
+      scriptPart?.imports,
+    );
   } catch {
     return false;
   }
@@ -155,17 +257,58 @@ export function createScriptRunner(options = {}) {
   let artifactObserver = null;
   /** @type {Set<Node>} */
   const artifactNodes = new Set();
+  /**
+   * Direct children of documentElement/head/body present when tracking started.
+   * Used to sweep card-injected siblings (e.g. 静浦 `#st-social-phone` on `<html>`).
+   * @type {Set<Node>}
+   */
+  let hostDomBaseline = new Set();
   /** @type {boolean} */
   let tornDown = false;
 
+  /**
+   * Known sticky selectors that card TH scripts mount outside the chat root.
+   * Shared across cards — cleanup must always remove these on switch.
+   */
+  const STICKY_CARD_UI_SELECTORS = [
+    '#st-social-phone',
+    '[id="st-social-phone"]',
+  ];
+
+  /**
+   * Full-open remote policy (flag '1' or host option). Allowlist-only mode
+   * returns false — callers must use per-URL checks via allowRemoteSrc /
+   * isRemoteThImportAllowedForScript.
+   */
   function resolveAllowRemote() {
     if (typeof options.allowRemoteImports === 'function') {
       return !!options.allowRemoteImports();
     }
     if (typeof options.allowRemoteImports === 'boolean') {
-      return options.allowRemoteImports;
+      return !!options.allowRemoteImports;
     }
-    return isRemoteThImportAllowed();
+    try {
+      const store =
+        typeof globalThis !== 'undefined' ? globalThis.localStorage : null;
+      return store?.getItem?.('conclave:feature:allow_remote_th_imports') === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  /** @param {string} [src] */
+  function allowRemoteSrc(src) {
+    if (resolveAllowRemote()) return true;
+    try {
+      const store =
+        typeof globalThis !== 'undefined' ? globalThis.localStorage : null;
+      if (store?.getItem?.('conclave:feature:allow_remote_th_imports') === '0') {
+        return false;
+      }
+    } catch {
+      /* ignore */
+    }
+    return isAllowlistedRemoteUrl(src);
   }
 
   /**
@@ -246,7 +389,18 @@ export function createScriptRunner(options = {}) {
     const root = getHostRoot();
     if (!root || !node || node.nodeType !== 1 /* ELEMENT_NODE */) return false;
     const element = /** @type {Element} */ (node);
-    return element === root || root.contains(element) || element.contains(root);
+    if (element === root) return true;
+    try {
+      if (typeof root.contains === 'function' && root.contains(element)) return true;
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (typeof element.contains === 'function' && element.contains(root)) return true;
+    } catch {
+      /* ignore */
+    }
+    return false;
   }
 
   /**
@@ -279,6 +433,84 @@ export function createScriptRunner(options = {}) {
   }
 
   /**
+   * Snapshot direct children of html/head/body so cleanup can remove later injects
+   * even if MutationObserver missed them (timing / wrong parent).
+   */
+  function captureHostDomBaseline() {
+    /** @type {Set<Node>} */
+    const baseline = new Set();
+    const roots = [doc?.documentElement, doc?.head, doc?.body].filter(Boolean);
+    for (const root of roots) {
+      const children = root.childNodes;
+      if (!children) continue;
+      for (let i = 0; i < children.length; i += 1) {
+        baseline.add(children[i]);
+      }
+    }
+    hostDomBaseline = baseline;
+  }
+
+  /**
+   * Remove a node if it is an element and not inside the chat host root.
+   * @param {Node|null|undefined} node
+   */
+  function removeIfCardArtifact(node) {
+    if (!node || node.nodeType !== 1 /* ELEMENT_NODE */) return;
+    if (isInsideHostRoot(node)) return;
+    try {
+      const el = /** @type {Element} */ (node);
+      if (typeof el.remove === 'function') {
+        el.remove();
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Sweep sticky card UIs + any non-baseline direct children of html/head/body.
+   * Covers 静浦「小手机」which mounts on documentElement (not body), which the
+   * original head/body-only observer never saw.
+   */
+  function sweepUntrackedCardDom() {
+    if (!doc) return;
+
+    if (typeof doc.querySelectorAll === 'function') {
+      try {
+        for (const sel of STICKY_CARD_UI_SELECTORS) {
+          doc.querySelectorAll(sel).forEach(node => {
+            removeIfCardArtifact(node);
+          });
+        }
+        doc
+          .querySelectorAll(
+            '[data-conclave-card-head="true"], script[data-conclave-card-script]',
+          )
+          .forEach(node => {
+            removeIfCardArtifact(node);
+          });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const containers = [doc.documentElement, doc.head, doc.body].filter(Boolean);
+    for (const container of containers) {
+      // Snapshot to array — live NodeList mutates while we remove.
+      const kids = Array.from(container.childNodes || []);
+      for (const child of kids) {
+        if (hostDomBaseline.has(child)) continue;
+        // Never remove the structural head/body elements themselves.
+        if (child === doc.head || child === doc.body) continue;
+        if (child.nodeType !== 1) continue;
+        const tag = /** @type {Element} */ (child).tagName;
+        if (tag === 'HEAD' || tag === 'BODY') continue;
+        removeIfCardArtifact(child);
+      }
+    }
+  }
+
+  /**
    * Disconnect observer and remove script/card artifact nodes; restore host document.
    * Does not abort runs by itself (use teardown()).
    */
@@ -291,43 +523,24 @@ export function createScriptRunner(options = {}) {
     artifactObserver = null;
 
     artifactNodes.forEach(node => {
-      try {
-        const el = /** @type {Element} */ (node);
-        if (typeof el.remove === 'function') {
-          el.remove();
-        }
-      } catch {
-        /* ignore */
-      }
+      removeIfCardArtifact(node);
     });
     artifactNodes.clear();
 
-    if (doc?.querySelectorAll) {
-      try {
-        doc
-          .querySelectorAll(
-            '[data-conclave-card-head="true"], script[data-conclave-card-script]',
-          )
-          .forEach(node => {
-            try {
-              node.remove();
-            } catch {
-              /* ignore */
-            }
-          });
-      } catch {
-        /* ignore */
-      }
-    }
-
+    sweepUntrackedCardDom();
     restoreHostDocumentState();
   }
 
   /**
-   * Start MutationObserver tracking of card-injected head/body nodes outside host root.
+   * Start MutationObserver tracking of card-injected nodes outside host root.
+   * Observes documentElement + head + body: TH scripts (静浦小手机) often append
+   * to documentElement, which a body-only observer would miss.
+   *
+   * Baseline is captured even when MutationObserver is unavailable (node tests)
+   * so cleanup can still sweep sticky selectors + non-baseline siblings.
    */
   function beginCardArtifactTracking() {
-    if (!doc?.head || !doc?.body || typeof MutationObserver === 'undefined') {
+    if (!doc?.head || !doc?.body) {
       return;
     }
     try {
@@ -335,15 +548,25 @@ export function createScriptRunner(options = {}) {
     } catch {
       /* ignore */
     }
+    artifactObserver = null;
+    captureHostDomBaseline();
+    tornDown = false;
+
+    if (typeof MutationObserver === 'undefined') {
+      return;
+    }
     const observer = new MutationObserver(mutations => {
       mutations.forEach(mutation => {
         mutation.addedNodes.forEach(rememberCardArtifact);
       });
     });
+    // documentElement catches siblings of head/body (fixed phone shells, etc.).
+    if (doc.documentElement) {
+      observer.observe(doc.documentElement, { childList: true });
+    }
     observer.observe(doc.head, { childList: true });
     observer.observe(doc.body, { childList: true });
     artifactObserver = observer;
-    tornDown = false;
   }
 
   /**
@@ -359,16 +582,29 @@ export function createScriptRunner(options = {}) {
     abort();
     cleanupArtifacts();
     tornDown = true;
-    // Soft mitigation: re-sweep once after abort in case an in-flight module
-    // appended nodes between abort and observer disconnect.
+    // Soft mitigation: re-sweep after abort in case an in-flight module
+    // appended nodes between abort and observer disconnect (common with TH
+    // 小手机 fixed shells). Microtask + short timer catch both sync and
+    // promise-then appends. Skip if beginCardArtifactTracking already ran
+    // for the next card (tornDown=false) so we do not kill the new card's UI.
+    const resweep = () => {
+      if (!tornDown) return;
+      try {
+        sweepUntrackedCardDom();
+        artifactNodes.forEach(node => {
+          removeIfCardArtifact(node);
+        });
+        artifactNodes.clear();
+      } catch {
+        /* ignore */
+      }
+    };
     if (typeof queueMicrotask === 'function') {
-      queueMicrotask(() => {
-        try {
-          cleanupArtifacts();
-        } catch {
-          /* ignore */
-        }
-      });
+      queueMicrotask(resweep);
+    }
+    if (typeof setTimeout === 'function') {
+      setTimeout(resweep, 0);
+      setTimeout(resweep, 50);
     }
   }
 
@@ -406,21 +642,58 @@ export function createScriptRunner(options = {}) {
   }
 
   /**
-   * Compatibility prelude for inline module scripts that touch storage.
+   * When the host page is already past `loading`, card scripts that only register
+   * `DOMContentLoaded` never run their init (e.g. 变身少女「状态栏美化」). For the
+   * duration of a sync classic script, fire those listeners on the next microtask.
+   *
+   * @param {string} content
+   * @returns {string}
+   */
+  function wrapClassicScriptWithDomReadyShim(content) {
+    const src = String(content || '');
+    if (!/\bDOMContentLoaded\b/.test(src)) return src;
+    return `
+(function(){
+  var __conclaveDocReady = typeof document !== 'undefined' && document.readyState !== 'loading';
+  var __conclaveOrigAdd = document.addEventListener.bind(document);
+  document.addEventListener = function(type, listener, options) {
+    if (__conclaveDocReady && type === 'DOMContentLoaded' && typeof listener === 'function') {
+      try {
+        if (typeof queueMicrotask === 'function') queueMicrotask(function(){ listener.call(document); });
+        else setTimeout(function(){ listener.call(document); }, 0);
+      } catch (e) { console.warn('[ScriptRunner] DOMContentLoaded shim', e); }
+      return;
+    }
+    return __conclaveOrigAdd(type, listener, options);
+  };
+  try {
+${src}
+  } finally {
+    document.addEventListener = __conclaveOrigAdd;
+  }
+})();
+`;
+  }
+
+  /**
+   * Compatibility prelude for inline module scripts that touch storage,
+   * plus classic-script DOMContentLoaded shim when the page is already loaded.
    *
    * @param {{ content?: string, type?: string }} scriptPart
    * @param {string} namespace
    * @returns {string}
    */
   function cardScriptContentWithCompatibilityPrelude(scriptPart, namespace) {
-    const content = scriptPart.content || '';
-    if (
-      !String(scriptPart.type || '').includes('module') ||
-      !/\b(?:localStorage|indexedDB)\b/.test(content)
-    ) {
-      return content;
+    let content = scriptPart.content || '';
+    const type = String(scriptPart.type || '');
+    const isModule = type.includes('module');
+
+    if (isModule && /\b(?:localStorage|indexedDB)\b/.test(content)) {
+      content = wrapModuleSourceWithNamespace(content, namespace);
+    } else if (!isModule) {
+      content = wrapClassicScriptWithDomReadyShim(content);
     }
-    return wrapModuleSourceWithNamespace(content, namespace);
+    return content;
   }
 
   /**
@@ -428,19 +701,26 @@ export function createScriptRunner(options = {}) {
    * @returns {boolean} true if the script should be executed
    */
   function shouldExecuteScriptPart(scriptPart) {
-    if (resolveAllowRemote()) return true;
-    if (hasRemoteHttpImport(scriptPart.content, scriptPart.imports)) {
-      const label =
-        scriptPart.name ||
-        `TavernHelper script ${scriptPart.index ?? ''}`.trim() ||
-        'script';
-      warn(
-        '[ScriptRunner] skipped remote http(s) import (set conclave:feature:allow_remote_th_imports=1 to override):',
-        label,
-      );
-      return false;
+    if (!hasRemoteHttpImport(scriptPart.content, scriptPart.imports)) {
+      return true;
     }
-    return true;
+    // Host option true / function true → allow any remote.
+    if (options.allowRemoteImports === true) return true;
+    if (typeof options.allowRemoteImports === 'function' && options.allowRemoteImports()) {
+      return true;
+    }
+    // Default: flag '1' all, '0' none, unset allowlist-only.
+    if (isRemoteThImportAllowedForScript(scriptPart)) return true;
+
+    const label =
+      scriptPart.name ||
+      `TavernHelper script ${scriptPart.index ?? ''}`.trim() ||
+      'script';
+    warn(
+      '[ScriptRunner] skipped remote http(s) import (allowlist or set conclave:feature:allow_remote_th_imports=1):',
+      label,
+    );
+    return false;
   }
 
   /**
@@ -535,16 +815,15 @@ export function createScriptRunner(options = {}) {
     const skipSrc =
       opts.skipSrcPattern instanceof RegExp ? opts.skipSrcPattern : /jquery/i;
     const list = Array.isArray(scripts) ? scripts : [];
-    const allowRemote = resolveAllowRemote();
 
     list.forEach(scriptPart => {
       if (runId !== scriptRunId) return;
       if (scriptPart.src && skipSrc.test(scriptPart.src)) return;
 
-      // Classic external script tags: same default-deny as module imports.
-      if (scriptPart.src && isRemoteScriptUrl(scriptPart.src) && !allowRemote) {
+      // Classic external script tags: allowlist or full-open flag.
+      if (scriptPart.src && isRemoteScriptUrl(scriptPart.src) && !allowRemoteSrc(scriptPart.src)) {
         warn(
-          '[ScriptRunner] skipped remote script src (set conclave:feature:allow_remote_th_imports=1 to override):',
+          '[ScriptRunner] skipped remote script src (allowlist or set conclave:feature:allow_remote_th_imports=1):',
           scriptPart.src,
         );
         return;
@@ -553,7 +832,10 @@ export function createScriptRunner(options = {}) {
       if (
         !scriptPart.src &&
         hasRemoteHttpImport(scriptPart.content) &&
-        !allowRemote
+        !shouldExecuteScriptPart({
+          content: scriptPart.content,
+          name: scriptPart.src || 'inline',
+        })
       ) {
         warn(
           '[ScriptRunner] skipped inline script with remote http(s) import',

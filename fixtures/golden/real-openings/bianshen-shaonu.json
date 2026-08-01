@@ -10,19 +10,19 @@
       "raw_len": 563,
       "error": null,
       "fingerprint": {
-        "sha256": "e45765b7ce4eb5b11a54aa10b442fd6b221bd64e87613bf9808460ef8c990fa5",
-        "length": 535,
+        "sha256": "dbb007490747b91b99b73e76df68fc9067f17ef6bec701a9f4274a8a126b574d",
+        "length": 662,
         "markers": []
       },
-      "preview": "本卡游玩需要安装提示词模板，酒馆助手，游玩时请检查局部正则与局部脚本是否打开 dreammini掉格式严重请左滑点开铅笔复制格式塞入预设的角色卡自定义格式部分 本卡仅发布于旅程和类脑社区，本卡完全免费，禁止一切形式的商业行为，禁止一切未经本"
+      "preview": "<p>本卡游玩需要安装提示词模板，酒馆助手，游玩时请检查局部正则与局部脚本是否打开</p> <p>dreammini掉格式严重请左滑点开铅笔复制格式塞入预设的角色卡自定义格式部分</p> <p>本卡仅发布于旅程和类脑社区，本卡完全免费，禁止"
     },
     {
       "index": 1,
       "raw_len": 3853,
       "error": null,
       "fingerprint": {
-        "sha256": "28cce6664847ef4568f315ea4077f7e59e1f294e771c60152b07881e4d52cf95",
-        "length": 30106,
+        "sha256": "22a8b84fb748203221776055a9a50c394ca4e8b434e56aa3f21e6bc261154f45",
+        "length": 30351,
         "markers": [
           "htmlish",
           "statusish"
@@ -35,8 +35,8 @@
       "raw_len": 4265,
       "error": null,
       "fingerprint": {
-        "sha256": "2f120a53532ca0bb6c0adf2532c138c30daf14e952564291c145f82d7ef479e4",
-        "length": 30508,
+        "sha256": "8c35c2fe4e2df695b405e4b5cb9ee19ddbacc583ae4fac17fa0143b8a6595b02",
+        "length": 30753,
         "markers": [
           "htmlish",
           "statusish"
@@ -49,8 +49,8 @@
       "raw_len": 3636,
       "error": null,
       "fingerprint": {
-        "sha256": "93cadb5002eb7244f0af0da6829604263145f9fc0cd2c04e3d01f11438614717",
-        "length": 29912,
+        "sha256": "1fbceb3ae4c8ac92ffaa449ed578f57ce4c615550af6e6c600ae30e3867b3a76",
+        "length": 30157,
         "markers": [
           "htmlish",
           "statusish"
@@ -63,8 +63,8 @@
       "raw_len": 3459,
       "error": null,
       "fingerprint": {
-        "sha256": "f7a5c7a0f966c91f663bed97a9fa579a13752564637c202f74ae1b88fdb6ddc1",
-        "length": 29718,
+        "sha256": "a0742ea64633fe3369a8ad930a593a2dab3a3aa695ccddc43a1c6db9bcc618bc",
+        "length": 29963,
         "markers": [
           "htmlish",
           "statusish"
@@ -77,8 +77,8 @@
       "raw_len": 3707,
       "error": null,
       "fingerprint": {
-        "sha256": "7a6f2c51295d8a599b51cffb5d3969e29048e1c50cab726ecc40c789e831dd53",
-        "length": 29956,
+        "sha256": "a22260799f65c7b9921e3fa3c1751376685337a89378e1cbd330c888b5c5d71a",
+        "length": 30201,
         "markers": [
           "htmlish",
           "statusish"
@@ -91,8 +91,8 @@
       "raw_len": 2279,
       "error": null,
       "fingerprint": {
-        "sha256": "7fefc1fc473e4d371902a35b818fc8b59f5f358f250db7e30283aa47e76f2964",
-        "length": 4781,
+        "sha256": "0d1b3581b3735ec87ca2071b9f409602d835d3b97ff435604787abd9932fa066",
+        "length": 4733,
         "markers": [
           "htmlish"
         ]
@@ -104,8 +104,8 @@
       "raw_len": 2341,
       "error": null,
       "fingerprint": {
-        "sha256": "6b333e6cda829a452eb0d00d3c16f96cf70e4a64a59c428454be1f93c69c6ebc",
-        "length": 4839,
+        "sha256": "98f01e3dfd3d1f9a4aaa78a5d9df5fb799b1c738e1c4a69f6a586ee8b3702e4a",
+        "length": 4795,
         "markers": [
           "htmlish"
         ]
@@ -117,8 +117,8 @@
       "raw_len": 2016,
       "error": null,
       "fingerprint": {
-        "sha256": "3260bf7f50a40a76c5a3aa7c7de7887106ff8fb111781783ccdd5269cf982d34",
-        "length": 4514,
+        "sha256": "251275a126314ed6d9439ce21583c4c5671998415624bfcb7f6ada735310dc44",
+        "length": 4494,
         "markers": [
           "htmlish"
         ]
@@ -130,8 +130,8 @@
       "raw_len": 2256,
       "error": null,
       "fingerprint": {
-        "sha256": "f618cde2a1afa109bc70ce7fbe621afaec9319c796503e9758cb392e96a4c417",
-        "length": 4746,
+        "sha256": "123df6a8ae8cc6282ff998a9f25b1330f8f13803fb74efc42dc6576f557369e6",
+        "length": 4698,
         "markers": [
           "htmlish"
         ]
@@ -143,8 +143,8 @@
       "raw_len": 2058,
       "error": null,
       "fingerprint": {
-        "sha256": "ac5c4f87eb0bc348a202b4dd5adb06eb5d722a23e01aecc1954e2ffac26f68fe",
-        "length": 4550,
+        "sha256": "3f229df2d1e466960c0ca1bc4187b46de3388252f0d3dc19ce699eecea7137cd",
+        "length": 4510,
         "markers": [
           "htmlish"
         ]
@@ -156,8 +156,8 @@
       "raw_len": 2971,
       "error": null,
       "fingerprint": {
-        "sha256": "6fbfdb60c3b54361273f907fcdf39c05f4965bccffd093717dd0a129af9feeea",
-        "length": 5422,
+        "sha256": "db9349bdb1cfa71d32d021d13e5bcd01e94671e7e9389bcfc68e519f35dc6223",
+        "length": 5429,
         "markers": [
           "fence_remaining",
           "htmlish"
@@ -235,14 +235,14 @@
       "raw_len": 128,
       "error": null,
       "fingerprint": {
-        "sha256": "de4df456d1a952425cefce9a70f533a34dba3a07222ede31bfe618e587178e45",
-        "length": 27491,
+        "sha256": "015adc12d168fb5eac344fd4d32c42c899ad924cb7c2dd036ad704f1e9e19fb6",
+        "length": 27761,
         "markers": [
           "htmlish",
           "statusish"
         ]
       },
-      "preview": "<think> </think> <dream> <style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYou&display=swa"
+      "preview": "<p><think> </think><br /> <dream></p> <style> @import url('https://fonts.googleapis.com/css2?family=ZCOOL+QingKe+HuangYo"
     }
   ],
   "st_align": "processDisplay = StatusPlaceHolder pre-pass + ST getRegexedString (AI_OUTPUT) + fence strip"

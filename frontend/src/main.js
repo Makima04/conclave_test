@@ -33,11 +33,13 @@ import {
   isDisplayRegexFeEnabled,
   regex_placement,
   createMessageMount,
+  substituteBasicParams,
 } from './st-host/render/index.js';
 import {
   createScriptRunner,
   buildStorageNamespace,
 } from './st-host/ScriptRunner.js';
+import { errorCatched } from './st-host/runtime/errorCatched.js';
 import { createPorts } from './bridge/createPorts.js';
 import { MVU_EVENTS } from './bridge/stEventMap.js';
 import { createMindService, isMindEnabled } from './mind/MindService.js';
@@ -269,6 +271,11 @@ function cleanupCardArtifacts() {
   scriptRunner.cleanupArtifacts();
   // PR-09: drop iframe + bridge when isolation path was used.
   destroyCardIframe();
+  try {
+    document.documentElement.classList.remove('conclave-card-ui-open');
+  } catch {
+    /* ignore */
+  }
 }
 
 function beginCardArtifactTracking() {
@@ -932,8 +939,79 @@ function createRuntime() {
     return Math.max(runtimeState.messages.length - 1, 0);
   }
 
+  /** ST / tavern_helper alias for latest floor id. */
+  function getLastMessageId() {
+    return getCurrentMessageId();
+  }
+
   function getVariables(option = { type: 'chat' }) {
     return clone(getVariableBucket(option));
+  }
+
+  /**
+   * Aggregate variables for statusbar bridge (`getAllVariables`).
+   * @returns {Record<string, unknown>}
+   */
+  function getAllVariables() {
+    return {
+      chat: clone(runtimeState.variables.chat || {}),
+      character: clone(runtimeState.variables.character || {}),
+      global: clone(runtimeState.variables.global || {}),
+      preset: clone(runtimeState.variables.preset || {}),
+      script: clone(runtimeState.variables.script || {}),
+      extension: clone(runtimeState.variables.extension || {}),
+      message: getMessageVariables({ message_id: 'latest' }),
+      stat_data: clone(runtimeState.mvuData?.stat_data || {}),
+      mvu: clone(runtimeState.mvuData || {}),
+    };
+  }
+
+  /**
+   * Card regex scripts as TavernHelper-shaped list (auto-regex).
+   * @returns {object[]}
+   */
+  function getTavernRegexes() {
+    return clone(store.getRegexScripts() || []);
+  }
+
+  /**
+   * Replace/update card regex scripts in session store (auto-regex enable path).
+   * @param {object[]|((list: object[]) => object[])} nextOrUpdater
+   */
+  function updateTavernRegexesWith(nextOrUpdater) {
+    const current = store.getRegexScripts() || [];
+    const next =
+      typeof nextOrUpdater === 'function'
+        ? nextOrUpdater(clone(current))
+        : nextOrUpdater;
+    if (typeof store.setRegexScripts === 'function') {
+      store.setRegexScripts(Array.isArray(next) ? next : current);
+    }
+    return getTavernRegexes();
+  }
+
+  /** Minimal toastr stub so statusbar toast calls do not throw. */
+  const toastr = {
+    success(msg) {
+      console.info('[toastr.success]', msg);
+    },
+    info(msg) {
+      console.info('[toastr.info]', msg);
+    },
+    warning(msg) {
+      console.warn('[toastr.warning]', msg);
+    },
+    error(msg) {
+      console.error('[toastr.error]', msg);
+    },
+  };
+
+  function substituteMacros(text) {
+    // ST-ish macro expand for statusbar (not full regex/markdown pipeline).
+    return substituteBasicParams(String(text ?? ''), {
+      userName: getDisplayUserName(),
+      characterOverride: getDisplayCharName(),
+    });
   }
 
   function replaceVariables(variables, option = { type: 'chat' }) {
@@ -1107,11 +1185,58 @@ function createRuntime() {
     return clone(current);
   }
 
+  /**
+   * ST createWorldbook — ensure a lorebook bucket exists (card opening scripts).
+   * @param {string} name
+   * @returns {Promise<string>}
+   */
+  async function createWorldbook(name) {
+    const key = String(name || '').trim() || cardName;
+    if (!runtimeState.lorebooks[key]) runtimeState.lorebooks[key] = [];
+    return key;
+  }
+
+  /**
+   * ST deleteWorldbookEntries — remove entries matching predicate or list.
+   * @param {string} lorebook
+   * @param {(entry: object) => boolean | object[] | string} matcher
+   */
+  async function deleteWorldbookEntries(lorebook, matcher) {
+    const key = String(lorebook || cardName);
+    const current = await getLorebookEntries(key);
+    let next = current;
+    if (typeof matcher === 'function') {
+      next = current.filter(entry => !matcher(entry));
+    } else if (Array.isArray(matcher)) {
+      const drop = new Set(
+        matcher.map(e => (e && (e.uid ?? e.id ?? e.comment ?? e.name)) ?? e),
+      );
+      next = current.filter(entry => {
+        const id = entry.uid ?? entry.id ?? entry.comment ?? entry.name;
+        return !drop.has(id);
+      });
+    } else if (typeof matcher === 'string') {
+      next = current.filter(
+        entry =>
+          entry.comment !== matcher &&
+          entry.name !== matcher &&
+          String(entry.uid) !== matcher,
+      );
+    }
+    runtimeState.lorebooks[key] = next;
+    return clone(next);
+  }
+
   async function triggerSlash(command) {
     console.log('[ConclaveSTHost] slash command:', command);
     if (String(command).startsWith('/echo')) return '';
     if (String(command).startsWith('/trigger')) return '';
     return '';
+  }
+
+  /** ST getScriptId — stable id for scoped script variables. */
+  function getScriptId() {
+    return `conclave-card-${store.getCurrentWorldbookId() ?? 'current'}`;
   }
 
   /** Wrap EventBus emit so DOM custom events still fire for legacy listeners. */
@@ -1150,6 +1275,8 @@ function createRuntime() {
       depth: options.depth,
       isEdit: !!options.isEdit,
       hasTavernHelperScripts: store.getTavernHelperScripts().length > 0,
+      userName: getDisplayUserName(),
+      characterOverride: getDisplayCharName(),
     });
   }
 
@@ -1173,23 +1300,49 @@ function createRuntime() {
     },
   };
 
+  // ST event_types subset used by cangxuan statusbar / auto-regex.
+  const tavern_events = Object.freeze({
+    ...MVU_EVENTS,
+    CHAT_CHANGED: 'chat_changed',
+    MESSAGE_RECEIVED: 'message_received',
+    MESSAGE_UPDATED: 'message_updated',
+    MESSAGE_DELETED: 'message_deleted',
+    MESSAGE_SWIPED: 'message_swiped',
+    MESSAGE_SENT: 'message_sent',
+    MESSAGE_EDITED: 'message_edited',
+    GENERATION_STARTED: 'generation_started',
+    GENERATION_ENDED: 'generation_ended',
+    CHARACTER_MESSAGE_RENDERED: 'character_message_rendered',
+    USER_MESSAGE_RENDERED: 'user_message_rendered',
+  });
+
   const TavernHelper = {
     triggerSlash,
     getCurrentMessageId,
+    getLastMessageId,
     getChatMessages,
     setChatMessages,
     setChatMessage,
     getLorebookEntries,
     setLorebookEntries,
+    createWorldbook,
+    deleteWorldbookEntries,
     getVariables,
+    getAllVariables,
     replaceVariables,
     updateVariablesWith,
     insertOrAssignVariables,
     insertVariables,
     deleteVariable,
+    getTavernRegexes,
+    updateTavernRegexesWith,
     initializeGlobal,
     waitGlobalInitialized,
     formatAsTavernRegexedString,
+    substituteMacros,
+    substitudeMacros: substituteMacros, // typo preserved (cangxuan statusbar)
+    errorCatched,
+    getScriptId,
     eventOn,
     eventOnce,
     eventEmit: eventEmitWithDom,
@@ -1200,7 +1353,7 @@ function createRuntime() {
   const contextFactory = createContextFactory({
     getRuntimeState: () => runtimeState,
     getCardName: () => cardName,
-    getUserName: () => 'User',
+    getUserName: () => getDisplayUserName(),
     getEventSource: () => eventSourceApi,
     getEventTypes: () => Mvu.events,
   });
@@ -1213,27 +1366,42 @@ function createRuntime() {
   define('jQuery', $);
   define('_', _);
   define('lodash', _);
+  // Must exist before card opening scripts (`$(errorCatched(init))`).
+  define('errorCatched', errorCatched);
+  define('getScriptId', getScriptId);
   define('triggerSlash', triggerSlash);
   define('getCurrentMessageId', getCurrentMessageId);
+  define('getLastMessageId', getLastMessageId);
   define('getChatMessages', getChatMessages);
   define('setChatMessages', setChatMessages);
   define('setChatMessage', setChatMessage);
   define('getLorebookEntries', getLorebookEntries);
   define('setLorebookEntries', setLorebookEntries);
+  define('createWorldbook', createWorldbook);
+  define('deleteWorldbookEntries', deleteWorldbookEntries);
   define('getVariables', getVariables);
+  define('getAllVariables', getAllVariables);
   define('replaceVariables', replaceVariables);
   define('updateVariablesWith', updateVariablesWith);
   define('insertOrAssignVariables', insertOrAssignVariables);
   define('insertVariables', insertVariables);
   define('deleteVariable', deleteVariable);
+  define('getTavernRegexes', getTavernRegexes);
+  define('updateTavernRegexesWith', updateTavernRegexesWith);
   define('initializeGlobal', initializeGlobal);
   define('waitGlobalInitialized', waitGlobalInitialized);
   define('formatAsTavernRegexedString', formatAsTavernRegexedString);
+  define('substituteMacros', substituteMacros);
+  define('substitudeMacros', substituteMacros);
   define('eventOn', eventOn);
   define('eventOnce', eventOnce);
   define('eventEmit', eventEmitWithDom);
   define('eventRemoveListener', eventRemoveListener);
   define('eventSource', eventSourceApi);
+  define('tavern_events', tavern_events);
+  define('toastr', toastr);
+  define('name1', getDisplayUserName());
+  define('name2', getDisplayCharName() || cardName);
   define('Mvu', Mvu);
   define('TavernHelper', TavernHelper);
   define('SillyTavern', {
@@ -1371,7 +1539,41 @@ function renderCardHtml(htmlContent, target) {
   installHeadNodes(headNodes);
   ensureRuntime();
   target.innerHTML = bodyHtml;
+  // Flag interactive full-page card UIs (opening shells, 3D flip, empty #panel mounts).
+  markInteractiveCardRoot(target, bodyHtml, scripts);
   executeScripts(scripts);
+}
+
+/**
+ * Mark message nodes that host card SPA shells so CSS can relax overflow / 3D.
+ * @param {HTMLElement} target
+ * @param {string} bodyHtml
+ * @param {Array<{ type?: string, content?: string, src?: string }>} scripts
+ */
+function markInteractiveCardRoot(target, bodyHtml, scripts) {
+  if (!target || typeof target.classList?.add !== 'function') return;
+  const html = String(bodyHtml || '');
+  const scriptBlob = (Array.isArray(scripts) ? scripts : [])
+    .map(s => `${s?.type || ''}\n${s?.content || ''}\n${s?.src || ''}`)
+    .join('\n');
+  const interactive =
+    /id=["'](?:main-tabs|panel|mg-main|mg-tt|mg-tc|status-card|st-social-phone)["']/.test(
+      html,
+    ) ||
+    /class=["'][^"']*\b(?:mg-main|wrap|status-card)\b/.test(html) ||
+    /type=["']module["']/.test(scriptBlob) ||
+    /errorCatched\s*\(/.test(scriptBlob) ||
+    /\$\(\s*errorCatched/.test(scriptBlob);
+
+  target.classList.toggle('st-assistant-message--card-ui', interactive);
+  try {
+    document.documentElement.classList.toggle(
+      'conclave-card-ui-open',
+      interactive && !!document.querySelector('.st-assistant-message--card-ui'),
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -1423,11 +1625,44 @@ function renderCardHtmlIframe(htmlContent, target) {
  * @param {string} [backendHint]
  * @returns {string}
  */
+/**
+ * Persona / {{user}} name (ST name1). Override via localStorage `conclave:user_name`.
+ * @returns {string}
+ */
+function getDisplayUserName() {
+  try {
+    const fromStore =
+      typeof store.getUserName === 'function' ? store.getUserName() : null;
+    if (fromStore) return String(fromStore);
+    const fromLs = globalThis.localStorage?.getItem?.('conclave:user_name');
+    if (fromLs && String(fromLs).trim()) return String(fromLs).trim();
+  } catch {
+    /* ignore */
+  }
+  return 'User';
+}
+
+/**
+ * Character / {{char}} name (ST name2). Prefer card name.
+ * @returns {string}
+ */
+function getDisplayCharName() {
+  try {
+    const name = store.getCardName?.();
+    if (name && String(name).trim()) return String(name).trim();
+  } catch {
+    /* ignore */
+  }
+  return '';
+}
+
 function renderDisplayHtml(raw, backendHint = '') {
   if (isDisplayRegexFeEnabled()) {
     const html = processDisplay(raw || '', store.getRegexScripts(), {
       placement: regex_placement.AI_OUTPUT,
       hasTavernHelperScripts: store.getTavernHelperScripts().length > 0,
+      userName: getDisplayUserName(),
+      characterOverride: getDisplayCharName(),
     });
     // Fall back to backend hint if FE produced empty but backend had content.
     if (html) return html;

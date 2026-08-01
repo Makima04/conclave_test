@@ -456,9 +456,16 @@ fn append_card_status_placeholder_if_needed(
     message: &str,
     scripts: &[card_loader::RegexScript],
 ) -> String {
+    // `card` retained for call-site symmetry with older signatures / future card-level gates.
+    let _ = card;
     const STATUS_PLACEHOLDER: &str = "<StatusPlaceHolderImpl/>";
 
-    if message.contains(STATUS_PLACEHOLDER) || !card.tavern_helper_scripts().is_empty() {
+    // Inject only when a markdownOnly StatusPlaceHolder script has a non-empty
+    // replaceString (regex-owned statusbars like 变身少女). Do not skip just
+    // because TavernHelper scripts exist — TH is often MVU / 小手机, not the
+    // statusbar. Remote-TH statusbar cards (苍玄) leave replaceString empty, so
+    // has_card_statusbar_regex stays false and we do not double-inject.
+    if message.contains(STATUS_PLACEHOLDER) {
         return message.to_string();
     }
 

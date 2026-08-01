@@ -76,13 +76,32 @@ describe('appendStatusPlaceholderIfNeeded', () => {
     expect(out).not.toContain(STATUS_PLACEHOLDER)
   })
 
-  it('does NOT inject when already present or TH scripts exist', () => {
+  it('does NOT inject when already present', () => {
     const withPh = `body\n${STATUS_PLACEHOLDER}`
     expect(appendStatusPlaceholderIfNeeded(withPh, [statusbar])).toBe(withPh)
+  })
 
+  it('still injects when TH scripts exist if statusbar regex has replace HTML', () => {
+    // Regression: bianshen has MVU TH + 「状态栏美化」— TH must not block inject.
     const msg = '<initvar>x</initvar>'
+    const out = appendStatusPlaceholderIfNeeded(msg, [statusbar], {
+      hasTavernHelperScripts: true,
+    })
+    expect(out).toContain(STATUS_PLACEHOLDER)
+  })
+
+  it('does NOT inject when StatusPlaceHolder replaceString is empty (cangxuan-style)', () => {
+    const msg = '<initvar>x</initvar>'
+    const emptyStatusbar = script({
+      findRegex: STATUS_PLACEHOLDER,
+      replaceString: '',
+      markdownOnly: true,
+    })
+    expect(appendStatusPlaceholderIfNeeded(msg, [emptyStatusbar])).toBe(msg)
     expect(
-      appendStatusPlaceholderIfNeeded(msg, [statusbar], { hasTavernHelperScripts: true }),
+      appendStatusPlaceholderIfNeeded(msg, [emptyStatusbar], {
+        hasTavernHelperScripts: true,
+      }),
     ).toBe(msg)
   })
 
@@ -120,6 +139,23 @@ describe('processDisplay StatusPlaceHolder integration', () => {
     expect(intro).not.toContain('status-card')
   })
 
+  it('injects + replaces statusbar even when hasTavernHelperScripts is true', () => {
+    const statusbar = script({
+      scriptName: '状态栏美化',
+      findRegex: STATUS_PLACEHOLDER,
+      replaceString: '<div id="status-card">空庭调教日记</div>',
+      markdownOnly: true,
+    })
+    const opening = processDisplay(
+      "<UpdateVariable>_.set('x', 1, 2);</UpdateVariable>\n正文",
+      [statusbar],
+      { hasTavernHelperScripts: true, markdown: false },
+    )
+    expect(opening).toContain('空庭调教日记')
+    expect(opening).toContain('status-card')
+    expect(opening).not.toContain(STATUS_PLACEHOLDER)
+  })
+
   it('end-to-end: prompt_only skipped, markdown fence stripped (Rust golden)', () => {
     const promptCleanup = script({
       scriptName: 'prompt cleanup',
@@ -149,7 +185,30 @@ describe('processDisplay StatusPlaceHolder integration', () => {
       replaceString: 'world',
       placement: [],
     })
-    expect(processDisplay('hello', [s])).toBe('hello')
+    // Markdown wraps plain text; content remains "hello" (regex skipped).
+    const out = processDisplay('hello', [s])
+    expect(out).toContain('hello')
+    expect(out).not.toContain('world')
+  })
+
+  it('substitutes {{user}} / {{char}} before regex', () => {
+    const out = processDisplay('你好{{user}}，我是{{char}}', [], {
+      userName: '浅野堇',
+      characterOverride: '苍玄界',
+      markdown: false,
+    })
+    expect(out).toBe('你好浅野堇，我是苍玄界')
+  })
+
+  it('converts plain newlines via markdown (simpleLineBreaks)', () => {
+    const out = processDisplay('第一行\n第二行\n\n第三段', [], {
+      substituteMacros: false,
+    })
+    // showdown simpleLineBreaks → <br> within paragraph or separate blocks
+    expect(out).toMatch(/第一行/)
+    expect(out).toMatch(/第二行/)
+    expect(out).toMatch(/第三段/)
+    expect(out.includes('<br') || out.includes('<p')).toBe(true)
   })
 })
 

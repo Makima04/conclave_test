@@ -99,6 +99,10 @@ export function mapGlobalToCapabilityId(g) {
     case 'waitGlobalInitialized':
     case 'getvar':
     case 'setvar':
+    case 'errorCatched':
+    case 'getScriptId':
+    case 'createWorldbook':
+    case 'deleteWorldbookEntries':
       return 'th.surface';
     case 'triggerSlash':
     case 'executeSlashCommands':

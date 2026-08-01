@@ -5,6 +5,9 @@ import {
   hasRemoteHttpImport,
   isRemoteScriptUrl,
   isRemoteThImportAllowed,
+  isAllowlistedRemoteUrl,
+  allRemoteImportsAllowlisted,
+  isRemoteThImportAllowedForScript,
 } from './ScriptRunner.js'
 
 describe('buildStorageNamespace', () => {
@@ -48,15 +51,43 @@ describe('hasRemoteHttpImport', () => {
 })
 
 describe('isRemoteThImportAllowed', () => {
-  it('defaults false and respects storage flag', () => {
+  it('defaults allowlist-mode true; 0 denies; 1 full open', () => {
     const store = new Map()
     const storage = {
       getItem: (k) => (store.has(k) ? store.get(k) : null),
       setItem: (k, v) => store.set(k, String(v)),
     }
+    // Unset → allowlist mode enabled (boolean gate true).
+    expect(isRemoteThImportAllowed(storage)).toBe(true)
+    storage.setItem('conclave:feature:allow_remote_th_imports', '0')
     expect(isRemoteThImportAllowed(storage)).toBe(false)
     storage.setItem('conclave:feature:allow_remote_th_imports', '1')
     expect(isRemoteThImportAllowed(storage)).toBe(true)
+  })
+})
+
+describe('remote allowlist', () => {
+  it('allows jsdelivr / testingcf hosts used by cangxuan statusbar', () => {
+    expect(
+      isAllowlistedRemoteUrl(
+        'https://testingcf.jsdelivr.net/gh/suosuosaku/st@cangxuan-v1.0.19/dist/cangxuan/statusbar/index.js',
+      ),
+    ).toBe(true)
+    expect(isAllowlistedRemoteUrl('https://evil.example/malware.js')).toBe(false)
+    expect(
+      allRemoteImportsAllowlisted(
+        "import 'https://testingcf.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate/artifact/bundle.js';",
+      ),
+    ).toBe(true)
+    expect(allRemoteImportsAllowlisted("import 'https://evil.example/x.js';")).toBe(
+      false,
+    )
+    expect(
+      isRemoteThImportAllowedForScript({
+        content:
+          "import 'https://testingcf.jsdelivr.net/gh/suosuosaku/st@cangxuan-v1.0.19/dist/cangxuan/statusbar/index.js'",
+      }),
+    ).toBe(true)
   })
 })
 
@@ -66,6 +97,7 @@ describe('isRemoteThImportAllowed', () => {
 function createMockDocument() {
   const bodyChildren = []
   const headChildren = []
+  const htmlChildren = []
 
   function createEl(tag) {
     const attrs = new Map()
@@ -73,6 +105,7 @@ function createMockDocument() {
       nodeType: 1, // ELEMENT_NODE
       tagName: String(tag).toUpperCase(),
       className: '',
+      id: '',
       textContent: '',
       src: '',
       type: '',
@@ -80,8 +113,10 @@ function createMockDocument() {
       isConnected: true,
       parent: null,
       children: [],
+      childNodes: [],
       setAttribute(name, value) {
         attrs.set(name, String(value))
+        if (name === 'id') this.id = String(value)
         if (name.startsWith('data-')) {
           const key = name
             .slice(5)
@@ -90,24 +125,41 @@ function createMockDocument() {
         }
       },
       getAttribute(name) {
+        if (name === 'id') return this.id || null
         return attrs.has(name) ? attrs.get(name) : null
       },
       removeAttribute(name) {
         attrs.delete(name)
+        if (name === 'id') this.id = ''
+      },
+      contains(other) {
+        if (!other || other === this) return other === this
+        let n = other
+        while (n) {
+          if (n === this) return true
+          n = n.parent
+        }
+        return false
       },
       remove() {
         this.isConnected = false
         if (this.parent?.children) {
           this.parent.children = this.parent.children.filter((c) => c !== this)
         }
+        if (this.parent?.childNodes) {
+          this.parent.childNodes = this.parent.childNodes.filter((c) => c !== this)
+        }
         const bi = bodyChildren.indexOf(this)
         if (bi >= 0) bodyChildren.splice(bi, 1)
         const hi = headChildren.indexOf(this)
         if (hi >= 0) headChildren.splice(hi, 1)
+        const yi = htmlChildren.indexOf(this)
+        if (yi >= 0) htmlChildren.splice(yi, 1)
       },
       appendChild(child) {
         child.parent = this
         this.children.push(child)
+        this.childNodes.push(child)
         return child
       },
     }
@@ -117,16 +169,34 @@ function createMockDocument() {
   const documentElement = createEl('html')
   const body = createEl('body')
   const head = createEl('head')
+  // Structural children of <html>
+  documentElement.appendChild(head)
+  documentElement.appendChild(body)
+  // Baseline includes head/body; card injects are extra html children.
+  documentElement.childNodes = [head, body]
+  documentElement.children = [head, body]
+  head.childNodes = []
+  body.childNodes = []
+
   body.appendChild = function appendChild(child) {
     child.parent = body
     body.children.push(child)
+    body.childNodes.push(child)
     bodyChildren.push(child)
     return child
   }
   head.appendChild = function appendChild(child) {
     child.parent = head
     head.children.push(child)
+    head.childNodes.push(child)
     headChildren.push(child)
+    return child
+  }
+  documentElement.appendChild = function appendChild(child) {
+    child.parent = documentElement
+    documentElement.children.push(child)
+    documentElement.childNodes.push(child)
+    htmlChildren.push(child)
     return child
   }
 
@@ -136,7 +206,10 @@ function createMockDocument() {
     head,
     createElement: createEl,
     querySelectorAll(sel) {
-      const all = [...bodyChildren, ...headChildren]
+      const all = [...bodyChildren, ...headChildren, ...htmlChildren]
+      if (sel.includes('st-social-phone')) {
+        return all.filter((n) => n.id === 'st-social-phone')
+      }
       if (sel.includes('data-conclave-card-script')) {
         return all.filter(
           (n) =>
@@ -150,6 +223,7 @@ function createMockDocument() {
       return []
     },
     _bodyChildren: bodyChildren,
+    _htmlChildren: htmlChildren,
   }
 }
 
@@ -279,6 +353,61 @@ describe('createScriptRunner', () => {
     expect(() => runner.teardown()).not.toThrow()
     expect(() => runner.abort()).not.toThrow()
     expect(() => runner.cleanupArtifacts()).not.toThrow()
+  })
+
+  it('cleanup removes documentElement sticky phone even if never tracked', () => {
+    // 静浦小手机: (documentElement||body).appendChild(root) with id st-social-phone
+    const doc = createMockDocument()
+    const hostRoot = doc.createElement('div')
+    hostRoot.id = 'st-message-area'
+    doc.body.appendChild(hostRoot)
+
+    const runner = createScriptRunner({
+      document: doc,
+      getHostRoot: () => hostRoot,
+      hostBaseline: {
+        htmlClassName: '',
+        htmlStyle: null,
+        bodyClassName: '',
+        bodyStyle: null,
+      },
+      warn,
+    })
+
+    // Baseline = head/body (+ hostRoot already on body). Capture before phone.
+    runner.beginCardArtifactTracking()
+
+    const phone = doc.createElement('div')
+    phone.id = 'st-social-phone'
+    phone.setAttribute('id', 'st-social-phone')
+    doc.documentElement.appendChild(phone)
+    // Intentionally do NOT call rememberCardArtifact — observer would in browser.
+
+    runner.cleanupArtifacts()
+    expect(phone.isConnected).toBe(false)
+    expect(doc._htmlChildren.includes(phone)).toBe(false)
+    // Host chat root must survive.
+    expect(hostRoot.isConnected).toBe(true)
+  })
+
+  it('cleanup does not remove host root children when sweeping body extras', () => {
+    const doc = createMockDocument()
+    const hostRoot = doc.createElement('div')
+    hostRoot.id = 'host'
+    doc.body.appendChild(hostRoot)
+    const bubble = doc.createElement('section')
+    bubble.className = 'st-assistant-message'
+    hostRoot.appendChild(bubble)
+
+    const runner = createScriptRunner({
+      document: doc,
+      getHostRoot: () => hostRoot,
+      warn,
+    })
+    runner.beginCardArtifactTracking()
+    runner.cleanupArtifacts()
+    expect(hostRoot.isConnected).toBe(true)
+    expect(bubble.parent).toBe(hostRoot)
   })
 
   it('skips remote http imports by default', async () => {

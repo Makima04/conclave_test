@@ -18,5 +18,5 @@
   "options": {
     "placement": 2
   },
-  "expected": "hello world"
+  "expected": "<p>hello world</p>"
 }

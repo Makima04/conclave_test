@@ -24,11 +24,11 @@
       "raw_len": 2,
       "error": null,
       "fingerprint": {
-        "sha256": "670d9743542cae3ea7ebe36af56bd53648b0a1126162e78d81a32934a711302e",
-        "length": 2,
+        "sha256": "cd2bdd085cff1018f1c76e41e9b6f2659c0341d3e8c86fa44f7b544c187224ca",
+        "length": 9,
         "markers": []
       },
-      "preview": "你好"
+      "preview": "<p>你好</p>"
     }
   ],
   "st_align": "processDisplay = StatusPlaceHolder pre-pass + ST getRegexedString (AI_OUTPUT) + fence strip"

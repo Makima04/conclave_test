@@ -7,12 +7,21 @@
 export { stripHtmlFences, stripOuterHtmlFence, looksLikeHtml } from './HtmlFence.js'
 
 export {
+  makeDisplayHtml,
+  isDisplayMarkdownEnabled,
+  shouldSkipMarkdown,
+  getMarkdownConverter,
+  resetMarkdownConverter,
+} from './MarkdownConverter.js'
+
+export {
   regex_placement,
   parseFindRegex,
   expandReplacement,
   shouldRunScript,
   runRegexScript,
   getRegexedString,
+  substituteBasicParams,
 } from './RegexEngine.js'
 
 export {

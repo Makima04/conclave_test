@@ -241,12 +241,53 @@
   padding: 14px;
 }
 
+/*
+ * Full-page card UIs (静浦 opening, 星与梦 3D flip) break under WebKit when an
+ * ancestor has overflow != visible. While a card shell is mounted, allow the
+ * message scroller to not clip 3D layers; scroll moves to the host if needed.
+ */
+html.conclave-card-ui-open .st-host {
+  overflow: auto;
+}
+
+html.conclave-card-ui-open .st-message-area {
+  overflow: visible;
+  flex: 1 1 auto;
+  min-height: min(100%, 70svh);
+}
+
 .st-assistant-message {
   width: 100%;
   display: block;
   color: #e5e7eb;
   font-size: 15px;
   line-height: 1.7;
+  word-break: break-word;
+  overflow: visible;
+}
+
+/* Card SPA shells: fill width, isolate stacking without killing preserve-3d kids */
+.st-assistant-message--card-ui {
+  overflow: visible;
+  min-height: min(720px, 85svh);
+  /* Local perspective for flip cards (星与梦 #mg-tt) */
+  perspective: 1400px;
+  transform-style: preserve-3d;
+}
+
+.st-assistant-message--card-ui .mg-tt,
+.st-assistant-message--card-ui .mg-ti {
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+}
+
+/* ST-like paragraph spacing after showdown.makeHtml */
+.st-assistant-message > p {
+  margin: 0 0 0.75em;
+}
+
+.st-assistant-message > p:last-child {
+  margin-bottom: 0;
 }
 
 .st-assistant-message > .cx-wrapper-reset {

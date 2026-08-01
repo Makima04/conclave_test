@@ -1,6 +1,6 @@
 {
   "id": "prompt-only-not-on-display",
-  "description": "promptOnly scripts must not change display pipeline output alone",
+  "description": "promptOnly must not change display alone",
   "source": "st-engine markdownOnly/promptOnly",
   "st_align": "promptOnly skipped when isPrompt=false",
   "raw": "<customized>X</customized>",
@@ -20,5 +20,5 @@
   "options": {
     "placement": 2
   },
-  "expected": "<customized>X</customized>"
+  "expected": "<p><customized>X</customized></p>"
 }
