@@ -3,31 +3,67 @@ import _ from 'lodash';
 import '@fortawesome/fontawesome-free/css/all.min.css';
 import './index.css';
 import './App.css';
+import { clone } from './shared/clone.js';
+import { hasOwn } from './shared/object.js';
+import {
+  createScopedIndexedDB,
+  createScopedLocalStorage,
+} from './shared/scopedStorage.js';
+import { readCardJsonFromFile } from './shared/cardFile.js';
+import { extractHtmlParts } from './shared/extractHtmlParts.js';
+import { createHostShell } from './shell/HostShell.js';
+import { createSessionStore } from './session/SessionStore.js';
+import { createSessionKernel } from './session/SessionKernel.js';
+import { createWindowAdapter } from './st-host/isolation/GlobalAdapter.js';
+import { createContextFactory } from './st-host/context/ContextFactory.js';
+import {
+  createCapabilityCatalog,
+  createCapabilityRegistry,
+  isStrictCapabilities,
+} from './st-host/capabilities/index.js';
 
 const OPENING_SWIPE_REFRESH_DELAY_MS = 650;
 
+/** Session truth: phase, card payload, requirements, runtime. */
+const store = createSessionStore();
+
+/**
+ * UI / host-chrome state only (not session authority).
+ * Session fields live on SessionStore; runtime is created solely by SessionKernel.
+ */
 const appState = {
-  cardName: '',
-  runtimeRequirements: null,
-  worldbookEntries: [],
-  tavernHelperScripts: [],
-  importedWorldbooks: [],
-  currentWorldbookId: null,
   activeView: 'opening',
   openingMessageNode: null,
-  openingRawMessages: [''],
-  openingRenderedMessages: [''],
   sending: false,
   importing: false,
   scriptRunId: 0,
   tavernHelperRunId: 0,
-  runtime: null,
   pendingRefreshTimers: new Map(),
   cardArtifactObserver: null,
   cardArtifactNodes: new Set(),
 };
 
+/** @type {ReturnType<typeof createSessionKernel> | null} */
+let kernel = null;
+
 const root = document.getElementById('root');
+const shell = createHostShell({
+  root,
+  onReturnOpening: () => showOpeningView(),
+  onImportFile: file => {
+    void importCardFile(file);
+  },
+  onSelectWorldbook: id => {
+    void selectImportedWorldbook(id);
+  },
+  onSend: () => {
+    void sendUserMessage();
+  },
+  onSwipe: delta => {
+    void changeOpeningSwipe(delta);
+  },
+});
+
 const hostDocumentBaseline = {
   htmlClassName: document.documentElement.className,
   htmlStyle: document.documentElement.getAttribute('style'),
@@ -60,75 +96,6 @@ function installClassicGlobalIdentifier(name, initializerExpression) {
 function installBundledCardGlobalCompatibility() {
   // Some bundled ST card UIs keep a bare `Vue;` external marker even when the runtime is not used.
   installClassicGlobalIdentifier('Vue', '{}');
-}
-
-function scopedLocalStorageKeys(prefix) {
-  const keys = [];
-  for (let index = 0; index < window.localStorage.length; index += 1) {
-    const key = window.localStorage.key(index);
-    if (key?.startsWith(prefix)) keys.push(key);
-  }
-  return keys;
-}
-
-function createScopedLocalStorage(namespace) {
-  const prefix = `${namespace}localStorage:`;
-  const storage = {
-    get length() {
-      return scopedLocalStorageKeys(prefix).length;
-    },
-    key(index) {
-      return scopedLocalStorageKeys(prefix)[Number(index)]?.slice(prefix.length) ?? null;
-    },
-    getItem(key) {
-      return window.localStorage.getItem(prefix + String(key));
-    },
-    setItem(key, value) {
-      window.localStorage.setItem(prefix + String(key), String(value));
-    },
-    removeItem(key) {
-      window.localStorage.removeItem(prefix + String(key));
-    },
-    clear() {
-      scopedLocalStorageKeys(prefix).forEach(key => window.localStorage.removeItem(key));
-    },
-  };
-
-  return new Proxy(storage, {
-    get(target, property) {
-      if (property in target) return target[property];
-      if (typeof property === 'string') return target.getItem(property);
-      return undefined;
-    },
-    set(target, property, value) {
-      if (typeof property !== 'string') return false;
-      target.setItem(property, value);
-      return true;
-    },
-    deleteProperty(target, property) {
-      if (typeof property !== 'string') return false;
-      target.removeItem(property);
-      return true;
-    },
-  });
-}
-
-function createScopedIndexedDB(namespace) {
-  const prefix = `${namespace}indexedDB:`;
-  return {
-    open(name, version) {
-      return window.indexedDB.open(prefix + String(name), version);
-    },
-    deleteDatabase(name) {
-      return window.indexedDB.deleteDatabase(prefix + String(name));
-    },
-    cmp(first, second) {
-      return window.indexedDB.cmp(first, second);
-    },
-    databases: window.indexedDB.databases
-      ? () => window.indexedDB.databases()
-      : undefined,
-  };
 }
 
 function installCardStorageCompatibility() {
@@ -177,89 +144,19 @@ installBundledCardGlobalCompatibility();
 installCardStorageCompatibility();
 installDomReadyCompatibility();
 
-function setRoot(html) {
-  if (root) root.innerHTML = html;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 function renderShell() {
-  setRoot(`
-    <div class="st-host">
-      <header class="st-host-header">
-        <div class="st-host-brand">
-          <h1 id="st-card-name">${escapeHtml(appState.cardName || 'Conclave')}</h1>
-          <span class="badge">Conclave ST Host</span>
-        </div>
-        <div class="st-host-actions">
-          <button id="st-back-button" class="st-icon-button" type="button" title="返回开场">
-            <i class="fa-solid fa-arrow-left"></i>
-            <span>返回开场</span>
-          </button>
-          <label class="st-import-button" for="st-card-import" title="导入 JSON/PNG">
-            <i class="fa-solid fa-file-import"></i>
-            <span>导入 JSON/PNG</span>
-            <input id="st-card-import" type="file" accept=".json,.png,application/json,image/png" />
-          </label>
-        </div>
-      </header>
-      <div class="st-workspace">
-        <aside class="st-worldbook-sidebar">
-          <div class="st-sidebar-heading">已导入世界书</div>
-          <div id="st-worldbook-list" class="st-worldbook-list"></div>
-        </aside>
-        <section class="st-render-pane">
-          <main id="st-message-area" class="st-message-area" aria-live="polite"></main>
-          <form id="st-input-form" class="input-bar">
-            <textarea id="st-user-input" placeholder="输入消息... (Enter 发送)" rows="1"></textarea>
-            <button id="st-send-button" type="submit">发送</button>
-          </form>
-        </section>
-      </div>
-    </div>
-  `);
-
-  renderWorldbookSidebar();
-
-  document.getElementById('st-back-button')?.addEventListener('click', () => showOpeningView());
-  document.getElementById('st-card-import')?.addEventListener('change', event => {
-    const file = event.currentTarget.files?.[0];
-    if (file) void importCardFile(file);
-    event.currentTarget.value = '';
-  });
-  document.getElementById('st-worldbook-list')?.addEventListener('click', event => {
-    const button = event.target.closest('[data-worldbook-id]');
-    if (!button) return;
-    void selectImportedWorldbook(Number(button.dataset.worldbookId));
-  });
-
-  const form = document.getElementById('st-input-form');
-  const input = document.getElementById('st-user-input');
-  form?.addEventListener('submit', event => {
-    event.preventDefault();
-    void sendUserMessage();
-  });
-  input?.addEventListener('keydown', event => {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      void sendUserMessage();
-    }
+  shell.renderShell({
+    cardName: store.getCardName() || 'Conclave',
+    worldbooks: store.getImportedWorldbooks(),
   });
 }
 
 function showLoading() {
-  setRoot('<div class="loading">正在加载角色卡...</div>');
+  shell.showLoading();
 }
 
 function showError(message) {
-  setRoot(`<div class="error">加载失败: ${escapeHtml(message)}</div>`);
+  shell.showError(message);
 }
 
 function clearPendingRefreshTimers() {
@@ -317,70 +214,24 @@ function beginCardArtifactTracking() {
   appState.cardArtifactObserver = observer;
 }
 
-function applyInitData(data) {
-  clearPendingRefreshTimers();
-  cleanupCardArtifacts();
-  appState.tavernHelperRunId += 1;
-
-  appState.cardName = data.card_name || 'Conclave';
-  appState.runtimeRequirements = data.runtime_requirements || null;
-  appState.worldbookEntries = Array.isArray(data.worldbook_entries) ? data.worldbook_entries : [];
-  appState.tavernHelperScripts = Array.isArray(data.tavern_helper_scripts) ? data.tavern_helper_scripts : [];
-  appState.importedWorldbooks = Array.isArray(data.imported_worldbooks) ? data.imported_worldbooks : [];
-  appState.currentWorldbookId = Number.isFinite(Number(data.current_worldbook_id))
-    ? Number(data.current_worldbook_id)
-    : null;
-  appState.openingRawMessages = [
-    data.first_message || '',
-    ...((Array.isArray(data.greetings) && data.greetings) || []),
-  ];
-  appState.openingRenderedMessages = [
-    data.rendered_html || '',
-    ...((Array.isArray(data.rendered_greetings) && data.rendered_greetings) || []),
-  ];
+/**
+ * @deprecated Use kernel.loadFromInitResponse — kept as thin alias for readability at call sites.
+ * @param {import('./session/types.js').InitResponseData} data
+ * @returns {Promise<void>}
+ */
+async function applyInitData(data) {
+  if (!kernel) throw new Error('[SessionKernel] kernel not initialized');
   appState.activeView = 'opening';
   appState.openingMessageNode = null;
-  appState.runtime = null;
-
-  renderShell();
-  beginCardArtifactTracking();
-  showOpeningView();
-  void executeTavernHelperScripts();
-}
-
-function renderWorldbookSidebar() {
-  const list = document.getElementById('st-worldbook-list');
-  if (!list) return;
-
-  if (!appState.importedWorldbooks.length) {
-    list.innerHTML = '<div class="st-worldbook-empty">尚未导入世界书</div>';
-    return;
-  }
-
-  list.innerHTML = appState.importedWorldbooks.map(item => {
-    const flags = [
-      `${Number(item.entry_count || 0)} 条`,
-      item.is_current ? '当前' : '可切换',
-    ].filter(Boolean).join(' · ');
-
-    return `
-      <button class="st-worldbook-item${item.is_current ? ' is-active' : ''}" type="button" data-worldbook-id="${item.id}">
-        <span class="st-worldbook-title">${escapeHtml(item.name || `导入项 ${item.id}`)}</span>
-        <span class="st-worldbook-meta">${escapeHtml(flags)}</span>
-      </button>
-    `;
-  }).join('');
+  await kernel.loadFromInitResponse(data);
 }
 
 function updateShellViewState() {
-  document.querySelectorAll('[data-worldbook-id]').forEach(button => {
-    const id = Number(button.dataset.worldbookId);
-    button.classList.toggle('is-active', id === appState.currentWorldbookId);
-  });
+  shell.updateWorldbookActive(store.getCurrentWorldbookId());
 }
 
 function showOpeningView() {
-  const messageArea = document.getElementById('st-message-area');
+  const messageArea = shell.getMessageArea();
   if (!messageArea) return;
 
   appState.activeView = 'opening';
@@ -391,7 +242,7 @@ function showOpeningView() {
   const message = runtime.runtimeState.messages[0];
   const swipeId = Number.isFinite(Number(message?.swipe_id)) ? Number(message.swipe_id) : 0;
   const rendered = Array.isArray(message?.rendered_swipes) ? message.rendered_swipes[swipeId] : '';
-  appendAssistantMessage(messageArea, rendered || message?.message || appState.openingRenderedMessages[0] || '', {
+  appendAssistantMessage(messageArea, rendered || message?.message || store.getOpeningRenderedMessages()[0] || '', {
     opening: true,
   });
   renderOpeningSwipeControls();
@@ -404,7 +255,7 @@ function getOpeningSwipeState() {
   const count = Math.max(
     Array.isArray(message?.swipes) ? message.swipes.length : 0,
     Array.isArray(message?.rendered_swipes) ? message.rendered_swipes.length : 0,
-    appState.openingRawMessages.length,
+    store.getOpeningRawMessages().length,
     1
   );
   const current = Number.isFinite(Number(message?.swipe_id)) ? Number(message.swipe_id) : 0;
@@ -415,34 +266,12 @@ function getOpeningSwipeState() {
 }
 
 function renderOpeningSwipeControls() {
-  document.querySelectorAll('.st-opening-swipe-controls').forEach(node => node.remove());
-  if (appState.activeView !== 'opening') return;
-
-  const messageArea = document.getElementById('st-message-area');
-  if (!messageArea) return;
-
+  if (appState.activeView !== 'opening') {
+    shell.clearOpeningSwipeControls();
+    return;
+  }
   const { count, current } = getOpeningSwipeState();
-  if (count <= 1) return;
-
-  const controls = document.createElement('div');
-  controls.className = 'st-opening-swipe-controls';
-  controls.innerHTML = `
-    <button type="button" data-swipe-delta="-1" aria-label="上一条开场" title="上一条开场">
-      <i class="fa-solid fa-chevron-left"></i>
-    </button>
-    <span>${current + 1} / ${count}</span>
-    <button type="button" data-swipe-delta="1" aria-label="下一条开场" title="下一条开场">
-      <i class="fa-solid fa-chevron-right"></i>
-    </button>
-  `;
-  controls.addEventListener('click', event => {
-    const button = event.target instanceof Element
-      ? event.target.closest('[data-swipe-delta]')
-      : null;
-    if (!button) return;
-    void changeOpeningSwipe(Number(button.dataset.swipeDelta));
-  });
-  messageArea.appendChild(controls);
+  shell.renderOpeningSwipeControls({ count, current });
 }
 
 async function changeOpeningSwipe(delta) {
@@ -455,7 +284,7 @@ async function changeOpeningSwipe(delta) {
 
 async function selectImportedWorldbook(importId) {
   if (!Number.isFinite(importId)) return;
-  if (importId === appState.currentWorldbookId) {
+  if (importId === store.getCurrentWorldbookId()) {
     showOpeningView();
     return;
   }
@@ -468,28 +297,12 @@ async function selectImportedWorldbook(importId) {
     });
     if (!response.ok) throw new Error(await response.text());
     const data = await response.json();
-    applyInitData(data);
+    await applyInitData(data);
   } catch (error) {
-    showError(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    kernel?.fail?.(message, { showUi: false });
+    showError(message);
   }
-}
-
-function extractHtmlParts(htmlContent) {
-  const parsed = new DOMParser().parseFromString(htmlContent || '', 'text/html');
-  const scriptNodes = Array.from(parsed.querySelectorAll('script'));
-  const scripts = scriptNodes.map(script => ({
-    src: script.getAttribute('src') || '',
-    type: script.getAttribute('type') || '',
-    content: script.textContent || '',
-  }));
-
-  scriptNodes.forEach(script => script.remove());
-
-  return {
-    headNodes: Array.from(parsed.head.childNodes).map(node => node.cloneNode(true)),
-    bodyHtml: parsed.body.innerHTML || htmlContent || '',
-    scripts,
-  };
 }
 
 function installHeadNodes(headNodes) {
@@ -512,19 +325,6 @@ function installHeadNodes(headNodes) {
   });
 }
 
-function clone(value) {
-  if (value === undefined) return undefined;
-  try {
-    return window.structuredClone ? window.structuredClone(value) : JSON.parse(JSON.stringify(value));
-  } catch {
-    return JSON.parse(JSON.stringify(value));
-  }
-}
-
-function hasOwn(value, key) {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
-
 async function importCardFile(file) {
   if (appState.importing) return;
   appState.importing = true;
@@ -539,9 +339,11 @@ async function importCardFile(file) {
     });
     if (!response.ok) throw new Error(await response.text());
     const data = await response.json();
-    applyInitData(data);
+    await applyInitData(data);
   } catch (error) {
-    showError(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    kernel?.fail?.(message, { showUi: false });
+    showError(message);
   } finally {
     appState.importing = false;
     setImportControlsDisabled(false);
@@ -549,133 +351,7 @@ async function importCardFile(file) {
 }
 
 function setImportControlsDisabled(disabled) {
-  const input = document.getElementById('st-card-import');
-  const label = document.querySelector('.st-import-button');
-  if (input) input.disabled = disabled;
-  label?.classList.toggle('is-disabled', disabled);
-}
-
-async function readCardJsonFromFile(file) {
-  const name = file.name.toLowerCase();
-  if (file.type === 'image/png' || name.endsWith('.png')) {
-    return extractCardJsonFromPng(await file.arrayBuffer());
-  }
-  return JSON.parse(await file.text());
-}
-
-function extractCardJsonFromPng(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
-  if (!signature.every((value, index) => bytes[index] === value)) {
-    throw new Error('PNG 文件签名无效');
-  }
-
-  const decoder = new TextDecoder();
-  const chunks = [];
-  let offset = 8;
-
-  while (offset + 12 <= bytes.length) {
-    const length = readUint32(bytes, offset);
-    const type = decoder.decode(bytes.slice(offset + 4, offset + 8));
-    const start = offset + 8;
-    const end = start + length;
-    if (end > bytes.length) break;
-
-    if (type === 'tEXt') {
-      const chunk = bytes.slice(start, end);
-      const split = chunk.indexOf(0);
-      if (split >= 0) {
-        chunks.push({
-          keyword: decoder.decode(chunk.slice(0, split)),
-          text: decoder.decode(chunk.slice(split + 1)),
-        });
-      }
-    } else if (type === 'iTXt') {
-      const parsed = parseInternationalTextChunk(bytes.slice(start, end), decoder);
-      if (parsed) chunks.push(parsed);
-    }
-
-    offset = end + 4;
-  }
-
-  const preferred = chunks
-    .filter(chunk => /^(chara|ccv3|character|card)$/i.test(chunk.keyword))
-    .concat(chunks);
-
-  for (const chunk of preferred) {
-    const parsed = parsePossiblyEncodedJson(chunk.text);
-    if (parsed) return parsed;
-  }
-
-  throw new Error('PNG 中未找到可解析的 SillyTavern 角色卡 JSON');
-}
-
-function parseInternationalTextChunk(chunk, decoder) {
-  let offset = chunk.indexOf(0);
-  if (offset < 0 || offset + 3 >= chunk.length) return null;
-
-  const keyword = decoder.decode(chunk.slice(0, offset));
-  const compressionFlag = chunk[offset + 1];
-  if (compressionFlag !== 0) return null;
-  offset += 3;
-
-  const languageEnd = chunk.indexOf(0, offset);
-  if (languageEnd < 0) return null;
-  offset = languageEnd + 1;
-
-  const translatedEnd = chunk.indexOf(0, offset);
-  if (translatedEnd < 0) return null;
-
-  return {
-    keyword,
-    text: decoder.decode(chunk.slice(translatedEnd + 1)),
-  };
-}
-
-function parsePossiblyEncodedJson(value) {
-  const candidates = [];
-  const trimmed = String(value || '').trim();
-  if (!trimmed) return null;
-
-  candidates.push(trimmed);
-
-  try {
-    candidates.push(decodeURIComponent(trimmed));
-  } catch {
-    // Not URI-encoded.
-  }
-
-  try {
-    const base64 = trimmed.replace(/^data:[^,]+,/, '');
-    candidates.push(decodeBase64Utf8(base64));
-  } catch {
-    // Not base64-encoded.
-  }
-
-  for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      // Try the next representation.
-    }
-  }
-
-  return null;
-}
-
-function decodeBase64Utf8(value) {
-  const binary = window.atob(value);
-  const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
-function readUint32(bytes, offset) {
-  return (
-    (bytes[offset] << 24) |
-    (bytes[offset + 1] << 16) |
-    (bytes[offset + 2] << 8) |
-    bytes[offset + 3]
-  ) >>> 0;
+  shell.setImportControlsDisabled(disabled);
 }
 
 function buildOpeningMvuData(message, defaultMvuData) {
@@ -942,22 +618,9 @@ function parseScalarValue(value) {
 function createRuntime() {
   const defaultMvuData = {
     initialized_lorebooks: {},
-    stat_data: {
-      '主角状态': {
-        '修为': {},
-        '灵石钱包': {},
-        '个人背包': {},
-      },
-      '世界系统': {
-        '今日运势': {},
-      },
-      '人际交往': {
-        '结识道友录': {},
-      },
-    },
+    stat_data: {},
   };
-  const defaultProfileContent = '【苍玄界·{{user}}档案】\n\n【姓名】\n姓名：\n\n【性别】\n性别：无\n\n【初始境界】\n境界：无\n\n【随身信物】\n名称：无\n描述：无\n\n【同行道友】\n记录：\n无\n\n【过往经历】\n描述：无\n\n</rule>';
-  const importedLorebookEntries = appState.worldbookEntries.map(entry => ({
+  const importedLorebookEntries = store.getWorldbookEntries().map(entry => ({
     uid: entry.id ?? entry.index + 1,
     id: entry.id ?? entry.index + 1,
     display_index: entry.insertion_order ?? entry.index,
@@ -969,12 +632,11 @@ function createRuntime() {
     secondary_keys: clone(entry.secondary_keys || []),
     content: entry.content || '',
   }));
-  const defaultLorebookEntries = importedLorebookEntries.length ? importedLorebookEntries : [
-    { uid: 1, id: 1, display_index: 1, comment: 'USER档案', enabled: true, content: defaultProfileContent },
-    { uid: 2, id: 2, display_index: 2, comment: '小索【人设】', enabled: false, content: '' },
-  ];
-  const openingRawMessages = appState.openingRawMessages.length ? appState.openingRawMessages : [''];
-  const openingRenderedMessages = appState.openingRenderedMessages.length ? appState.openingRenderedMessages : [''];
+  const defaultLorebookEntries = importedLorebookEntries;
+  const openingRawMessages = store.getOpeningRawMessages().length ? store.getOpeningRawMessages() : [''];
+  const openingRenderedMessages = store.getOpeningRenderedMessages().length
+    ? store.getOpeningRenderedMessages()
+    : [''];
   const openingSwipeCount = Math.max(openingRawMessages.length, openingRenderedMessages.length, 1);
   const openingSwipes = Array.from({ length: openingSwipeCount }, (_, index) =>
     openingRawMessages[index] ?? openingRenderedMessages[index] ?? ''
@@ -987,6 +649,7 @@ function createRuntime() {
   );
   const openingSwipeInfo = Array.from({ length: openingSwipeCount }, () => ({}));
   const initialMvuData = clone(openingSwipeData[0] || defaultMvuData);
+  const cardName = store.getCardName() || '当前角色卡世界书';
   const runtimeState = {
     mvuData: clone(initialMvuData),
     messages: [{
@@ -1004,9 +667,7 @@ function createRuntime() {
       swipes_info: openingSwipeInfo,
     }],
     lorebooks: {
-      [appState.cardName || '当前角色卡世界书']: clone(defaultLorebookEntries),
-      '苍玄界_修订版世界书': clone(defaultLorebookEntries),
-      '我的苍玄界，才不会这么跌宕起伏！': clone(defaultLorebookEntries),
+      [cardName]: clone(defaultLorebookEntries),
     },
     variables: {
       chat: {},
@@ -1269,7 +930,7 @@ function createRuntime() {
   }
 
   async function getLorebookEntries(lorebook) {
-    if (!runtimeState.lorebooks[lorebook]) runtimeState.lorebooks[lorebook] = clone(defaultLorebookEntries);
+    if (!runtimeState.lorebooks[lorebook]) runtimeState.lorebooks[lorebook] = [];
     return clone(runtimeState.lorebooks[lorebook]);
   }
 
@@ -1335,7 +996,14 @@ function createRuntime() {
     });
   }
 
+  let formatAsTavernRegexedStringWarned = false;
   function formatAsTavernRegexedString(text) {
+    if (!formatAsTavernRegexedStringWarned) {
+      formatAsTavernRegexedStringWarned = true;
+      console.warn(
+        '[ConclaveSTHost] formatAsTavernRegexedString is identity stub until P1 RenderPipeline'
+      );
+    }
     return String(text ?? '');
   }
 
@@ -1357,6 +1025,7 @@ function createRuntime() {
       void eventEmit(Mvu.events.VARIABLE_UPDATE_ENDED, runtimeState.mvuData, oldData);
     },
     async parseMessage(_message, oldData) {
+      // Stub: full MagVarUpdate parse lands later; surface is ready subset.
       return clone(oldData);
     },
     isDuringExtraAnalysis() {
@@ -1387,57 +1056,128 @@ function createRuntime() {
     eventRemoveListener,
   };
 
-  Object.assign(window, {
-    $,
-    jQuery: $,
-    _,
-    lodash: _,
-    triggerSlash,
-    getCurrentMessageId,
-    getChatMessages,
-    setChatMessages,
-    setChatMessage,
-    getLorebookEntries,
-    setLorebookEntries,
-    getVariables,
-    replaceVariables,
-    updateVariablesWith,
-    insertOrAssignVariables,
-    insertVariables,
-    deleteVariable,
-    initializeGlobal,
-    waitGlobalInitialized,
-    formatAsTavernRegexedString,
-    eventOn,
-    eventOnce,
-    eventEmit,
-    eventRemoveListener,
-    eventSource: {
-      on: eventOn,
-      once: eventOnce,
-      emit: eventEmit,
-      removeListener: eventRemoveListener,
-    },
-    Mvu,
-    TavernHelper,
-    SillyTavern: {
-      getContext() {
-        return TavernHelper;
-      },
-    },
+  const eventSourceApi = {
+    on: eventOn,
+    once: eventOnce,
+    emit: eventEmit,
+    removeListener: eventRemoveListener,
+  };
+
+  // PR-04: real getContext() via ContextFactory — NEVER returns TavernHelper.
+  const contextFactory = createContextFactory({
+    getRuntimeState: () => runtimeState,
+    getCardName: () => cardName,
+    getUserName: () => 'User',
+    getEventSource: () => eventSourceApi,
+    getEventTypes: () => Mvu.events,
   });
 
-  return { runtimeState, triggerSlash, eventEmit };
+  // PR-04: all session globals go through GlobalAdapter for tracked teardown.
+  const adapter = createWindowAdapter(window);
+  const define = (path, value) => adapter.defineGlobal(path, value);
+
+  define('$', $);
+  define('jQuery', $);
+  define('_', _);
+  define('lodash', _);
+  define('triggerSlash', triggerSlash);
+  define('getCurrentMessageId', getCurrentMessageId);
+  define('getChatMessages', getChatMessages);
+  define('setChatMessages', setChatMessages);
+  define('setChatMessage', setChatMessage);
+  define('getLorebookEntries', getLorebookEntries);
+  define('setLorebookEntries', setLorebookEntries);
+  define('getVariables', getVariables);
+  define('replaceVariables', replaceVariables);
+  define('updateVariablesWith', updateVariablesWith);
+  define('insertOrAssignVariables', insertOrAssignVariables);
+  define('insertVariables', insertVariables);
+  define('deleteVariable', deleteVariable);
+  define('initializeGlobal', initializeGlobal);
+  define('waitGlobalInitialized', waitGlobalInitialized);
+  define('formatAsTavernRegexedString', formatAsTavernRegexedString);
+  define('eventOn', eventOn);
+  define('eventOnce', eventOnce);
+  define('eventEmit', eventEmit);
+  define('eventRemoveListener', eventRemoveListener);
+  define('eventSource', eventSourceApi);
+  define('Mvu', Mvu);
+  define('TavernHelper', TavernHelper);
+  define('SillyTavern', {
+    getContext: () => contextFactory.getContext(),
+  });
+
+  const surfaces = {
+    jquery: $,
+    lodash: _,
+    tavernHelper: TavernHelper,
+    mvu: Mvu,
+    eventApi: {
+      eventOn,
+      eventOnce,
+      eventEmit,
+      eventRemoveListener,
+    },
+    contextFactory,
+    triggerSlash,
+    formatAsTavernRegexedString,
+    storageReady: true,
+  };
+
+  return {
+    runtimeState,
+    triggerSlash,
+    eventEmit,
+    adapter,
+    contextFactory,
+    surfaces,
+  };
 }
 
+/**
+ * PR-04: plan + install capabilities against surfaces from createRuntime.
+ * Strict mode (default): missing required_shims / requiredByDefault → ok:false.
+ *
+ * @param {object|null} requirements
+ * @param {import('./session/types.js').SessionRuntime} runtime
+ * @returns {Promise<{ ok: boolean, report: object, registry: object }>}
+ */
+async function installCapabilities(requirements, runtime) {
+  const adapter = runtime?.adapter || createWindowAdapter(window);
+  const catalog = createCapabilityCatalog({
+    adapter,
+    surfaces: runtime?.surfaces || {},
+  });
+  const registry = createCapabilityRegistry({
+    catalog,
+    adapter,
+    strict: isStrictCapabilities(),
+  });
+  runtime.capabilityRegistry = registry;
+
+  // Surfaces were already defined in createRuntime; catalog install re-binds / reports status.
+  const report = await registry.install(requirements);
+  return { ok: report.ok, report, registry };
+}
+
+/**
+ * Return the Kernel-owned runtime. Does **not** create — createRuntime runs only
+ * once on the enter-running path inside SessionKernel.loadFromInitResponse.
+ * @returns {import('./session/types.js').SessionRuntime}
+ */
 function ensureRuntime() {
-  if (!appState.runtime) appState.runtime = createRuntime();
-  return appState.runtime;
+  const runtime = store.getRuntime();
+  if (!runtime) {
+    throw new Error(
+      '[SessionKernel] runtime unavailable — create only via Kernel enter-running path'
+    );
+  }
+  return runtime;
 }
 
 async function executeTavernHelperScripts() {
   const runId = ++appState.tavernHelperRunId;
-  const scripts = appState.tavernHelperScripts.filter(script => String(script.content || '').trim());
+  const scripts = store.getTavernHelperScripts().filter(script => String(script.content || '').trim());
   if (!scripts.length) return;
 
   ensureRuntime();
@@ -1458,9 +1198,10 @@ async function executeTavernHelperScripts() {
     }
   }
 
-  if (runId === appState.tavernHelperRunId && appState.runtime) {
-    const data = clone(appState.runtime.runtimeState.mvuData || {});
-    await appState.runtime.eventEmit?.(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || 'mag_variable_update_ended', data, data);
+  const liveRuntime = store.getRuntime();
+  if (runId === appState.tavernHelperRunId && liveRuntime) {
+    const data = clone(liveRuntime.runtimeState.mvuData || {});
+    await liveRuntime.eventEmit?.(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || 'mag_variable_update_ended', data, data);
   }
 }
 
@@ -1483,7 +1224,7 @@ function cardScriptContentWithCompatibilityPrelude(scriptPart) {
     return content;
   }
 
-  const cardKey = `${appState.currentWorldbookId ?? 'current'}:${appState.cardName || 'default'}`;
+  const cardKey = `${store.getCurrentWorldbookId() ?? 'current'}:${store.getCardName() || 'default'}`;
   const namespace = JSON.stringify(`conclave:card:${cardKey}:`);
 
   return `
@@ -1528,9 +1269,10 @@ function scheduleDisplayedMessageRefresh(messageId, delayMs = 0) {
 }
 
 function refreshDisplayedMessage(messageId) {
-  if (messageId !== 0 || !appState.openingMessageNode || !appState.runtime) return;
+  const runtime = store.getRuntime();
+  if (messageId !== 0 || !appState.openingMessageNode || !runtime) return;
 
-  const message = appState.runtime.runtimeState.messages[0];
+  const message = runtime.runtimeState.messages[0];
   if (!message) return;
 
   const swipeId = Number.isFinite(Number(message.swipe_id)) ? Number(message.swipe_id) : 0;
@@ -1556,18 +1298,14 @@ function appendAssistantMessage(messageArea, htmlContent, options = {}) {
 }
 
 async function sendUserMessage() {
-  const input = document.getElementById('st-user-input');
-  const button = document.getElementById('st-send-button');
-  const messageArea = document.getElementById('st-message-area');
+  const input = shell.getUserInput();
+  const messageArea = shell.getMessageArea();
   const message = input?.value.trim();
   if (!message || appState.sending || !messageArea) return;
 
   appState.sending = true;
-  if (input) input.value = '';
-  if (button) {
-    button.disabled = true;
-    button.textContent = '...';
-  }
+  shell.clearUserInput();
+  shell.setSending(true);
   appendUserMessage(messageArea, message);
 
   try {
@@ -1586,10 +1324,7 @@ async function sendUserMessage() {
     messageArea.appendChild(node);
   } finally {
     appState.sending = false;
-    if (button) {
-      button.disabled = false;
-      button.textContent = '发送';
-    }
+    shell.setSending(false);
   }
 }
 
@@ -1599,11 +1334,36 @@ async function init() {
     const response = await fetch('/api/init');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    applyInitData(data);
+    await applyInitData(data);
   } catch (error) {
-    showError(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    kernel?.fail?.(message, { showUi: false });
+    showError(message);
   }
 }
+
+kernel = createSessionKernel({
+  store,
+  shell,
+  createRuntime,
+  hooks: {
+    clearPendingRefreshTimers,
+    cleanupCardArtifacts,
+    onTeardown() {
+      // Invalidate in-flight TH scripts and drop opening DOM handles.
+      appState.tavernHelperRunId += 1;
+      appState.scriptRunId += 1;
+      appState.activeView = 'opening';
+      appState.openingMessageNode = null;
+    },
+    renderShell,
+    beginCardArtifactTracking,
+    showOpeningView,
+    executeTavernHelperScripts,
+    showError,
+    installCapabilities,
+  },
+});
 
 window.addEventListener('error', event => {
   console.warn('[ConclaveSTHost] runtime error:', {

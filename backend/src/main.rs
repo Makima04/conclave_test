@@ -290,10 +290,11 @@ async fn chat_handler(
         store.current_card().clone()
     };
 
-    // 1. 组装 Prompt (调用 EJS 解析世界书)
+    // 1. 组装 Prompt（通用 WI 摘要 + state dump；injections 默认空，Mind 预留）
     let _system_prompt = lorebook::compile_prompt(
         &serde_json::to_value(&card).unwrap_or_default(),
         &game_state,
+        None,
     );
 
     // 2. Mock LLM 响应（演示正则管线效果）
@@ -552,24 +553,21 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// 中性初始 game_state：不写死任何卡片（如苍玄）的经济/区域字段。
+/// 卡片特定 MVU 应由开场 `<initvar>` / 前端解析 / 扩展注入填充。
 fn initial_game_state(card: &card_loader::CardData) -> serde_json::Value {
     serde_json::json!({
-        "stat_data": {
-            "主角状态": {
-                "灵石钱包": { "下品灵石": 50 }
-            },
-            "世界系统": {
-                "大区域": "未知区域"
-            }
-        },
-        "tavern_vars": card.tavern_variables()
+        "stat_data": {},
+        "tavern_vars": card.tavern_variables(),
+        "initialized_lorebooks": {},
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{message_has_status_variable_payload, render_card_message};
+    use super::{initial_game_state, message_has_status_variable_payload, render_card_message};
     use crate::card_loader::{CardData, CardInner, RegexScript};
+    use serde_json::json;
 
     #[test]
     fn status_placeholder_injection_requires_variable_payload() {
@@ -629,6 +627,78 @@ mod tests {
 
         assert!(!intro.contains("status-card"));
         assert!(opening.contains("status-card"));
+    }
+
+    /// 最小非苍玄卡：initial_game_state 不得注入「灵石」等卡片专用键
+    fn minimal_neutral_card() -> CardData {
+        CardData {
+            name: "Neutral Demo".to_string(),
+            description: String::new(),
+            personality: String::new(),
+            scenario: String::new(),
+            first_mes: "Welcome to a generic story.".to_string(),
+            mes_example: String::new(),
+            creatorcomment: String::new(),
+            tags: vec!["test".to_string()],
+            data: CardInner {
+                name: "Neutral Demo".to_string(),
+                system_prompt: "You narrate a fantasy adventure.".to_string(),
+                post_history_instructions: String::new(),
+                first_mes: "Welcome to a generic story.".to_string(),
+                alternate_greetings: Vec::new(),
+                character_book: None,
+                extensions: json!({
+                    "tavern_helper": {
+                        "variables": {
+                            "mood": "calm"
+                        }
+                    }
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn initial_game_state_is_neutral_without_spirit_stone_keys() {
+        let card = minimal_neutral_card();
+        let state = initial_game_state(&card);
+
+        assert!(state["stat_data"].is_object());
+        assert_eq!(state["stat_data"], json!({}));
+        assert_eq!(state["tavern_vars"]["mood"], "calm");
+        assert_eq!(state["initialized_lorebooks"], json!({}));
+
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert!(
+            !serialized.contains("灵石"),
+            "neutral initial state must not hardcode 灵石: {serialized}"
+        );
+        assert!(
+            !serialized.contains("世界系统"),
+            "neutral initial state must not hardcode 世界系统: {serialized}"
+        );
+        assert!(
+            !serialized.contains("大区域"),
+            "neutral initial state must not hardcode 大区域: {serialized}"
+        );
+        assert!(
+            !serialized.contains("主角状态"),
+            "neutral initial state must not hardcode 主角状态: {serialized}"
+        );
+    }
+
+    #[test]
+    fn initial_game_state_for_cangxuan_fixture_also_has_empty_stat_data() {
+        // 即使加载苍玄卡，后端初始 state 也不再预填苍玄经济/区域；
+        // 那些字段应来自消息 initvar，而非内核默认。
+        let card = CardData::from_json(include_str!("../data/cangxuan_v1.0.20.json"))
+            .expect("cangxuan fixture parses");
+        let state = initial_game_state(&card);
+
+        assert_eq!(state["stat_data"], json!({}));
+        let serialized = serde_json::to_string(&state["stat_data"]).unwrap();
+        assert!(!serialized.contains("灵石"));
+        assert!(!serialized.contains("大区域"));
     }
 }
 
