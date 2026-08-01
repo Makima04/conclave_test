@@ -2,9 +2,10 @@
  * Display RenderPipeline (architecture-host-mind.md §5.2).
  *
  * raw → substituteParams → StatusPlaceHolder? → getRegexedString (source)
- *     → getRegexedString (markdown) → stripHtmlFences → makeDisplayHtml
+ *     → getRegexedString (markdown) → stripHtmlFences
+ *     → makeDisplayHtml (encodeStyleTags → showdown → decodeStyleTags)
  *
- * Aligns with ST messageFormatting order (macros → regex → showdown.makeHtml),
+ * Aligns with ST messageFormatting (macros → regex → makeHtml + style protect),
  * plus Conclave fence strip for card ```html openings.
  *
  * @module st-host/render/RenderPipeline

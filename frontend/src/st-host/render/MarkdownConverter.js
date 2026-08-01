@@ -11,6 +11,7 @@
  */
 
 import Showdown from 'showdown'
+import { decodeStyleTags, encodeStyleTags } from './StyleTags.js'
 
 /** @type {Showdown.Converter|null} */
 let converter = null
@@ -84,8 +85,16 @@ export function shouldSkipMarkdown(text) {
 /**
  * Convert display text to HTML (ST `converter.makeHtml` step).
  *
+ * Style tags are encoded before showdown and restored after so large card
+ * CSS blocks (statusbars) survive simpleLineBreaks — see StyleTags.js.
+ *
  * @param {string} text
- * @param {{ enabled?: boolean }} [options]
+ * @param {{
+ *   enabled?: boolean,
+ *   stylePrefix?: string,
+ *   mediaAllowed?: boolean,
+ *   protectStyles?: boolean,
+ * }} [options]
  * @returns {string}
  */
 export function makeDisplayHtml(text, options = {}) {
@@ -98,8 +107,21 @@ export function makeDisplayHtml(text, options = {}) {
   if (!enabled) return raw
   if (shouldSkipMarkdown(raw)) return raw
 
+  const protectStyles = options.protectStyles !== false
+  const decodeOpts = {
+    prefix: options.stylePrefix != null ? String(options.stylePrefix) : '',
+    mediaAllowed: options.mediaAllowed !== false,
+  }
+
   try {
-    return getMarkdownConverter().makeHtml(raw)
+    if (!protectStyles) {
+      return getMarkdownConverter().makeHtml(raw)
+    }
+    // ST messageFormatting order is makeHtml → encode → purify → decode.
+    // We encode *before* makeHtml so showdown cannot split </style> (see module).
+    const encoded = encodeStyleTags(raw)
+    const html = getMarkdownConverter().makeHtml(encoded)
+    return decodeStyleTags(html, decodeOpts)
   } catch (err) {
     console.warn('[MarkdownConverter] makeHtml failed, returning raw:', err)
     return raw

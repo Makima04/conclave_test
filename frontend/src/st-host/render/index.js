@@ -15,6 +15,14 @@ export {
 } from './MarkdownConverter.js'
 
 export {
+  encodeStyleTags,
+  decodeStyleTags,
+  stripBreaksFromCss,
+  prefixCssSelectors,
+  withProtectedStyleTags,
+} from './StyleTags.js'
+
+export {
   regex_placement,
   parseFindRegex,
   expandReplacement,
