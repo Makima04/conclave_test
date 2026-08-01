@@ -26,7 +26,12 @@ import {
   processDisplay,
   isDisplayRegexFeEnabled,
   regex_placement,
+  createMessageMount,
 } from './st-host/render/index.js';
+import {
+  createScriptRunner,
+  buildStorageNamespace,
+} from './st-host/ScriptRunner.js';
 import { createPorts } from './bridge/createPorts.js';
 import { MVU_EVENTS } from './bridge/stEventMap.js';
 
@@ -43,17 +48,14 @@ const ports = createPorts({
 /**
  * UI / host-chrome state only (not session authority).
  * Session fields live on SessionStore; runtime is created solely by SessionKernel.
+ * Script run generations / artifacts live on ScriptRunner (PR-08).
  */
 const appState = {
   activeView: 'opening',
   openingMessageNode: null,
   sending: false,
   importing: false,
-  scriptRunId: 0,
-  tavernHelperRunId: 0,
   pendingRefreshTimers: new Map(),
-  cardArtifactObserver: null,
-  cardArtifactNodes: new Set(),
 };
 
 /** @type {ReturnType<typeof createSessionKernel> | null} */
@@ -83,6 +85,25 @@ const hostDocumentBaseline = {
   bodyClassName: document.body.className,
   bodyStyle: document.body.getAttribute('style'),
 };
+
+/** PR-08: unified abort / namespace / artifact lifecycle for TH + card scripts. */
+const scriptRunner = createScriptRunner({
+  document,
+  getHostRoot: () => root,
+  hostBaseline: hostDocumentBaseline,
+});
+
+/**
+ * PR-08: MessageMount owns opening/message DOM for card-switch teardown.
+ * renderHtmlInto reuses renderCardHtml (head nodes + inline scripts).
+ */
+const messageMount = createMessageMount({
+  getRoot: () => shell.getMessageArea(),
+  renderHtmlInto: (html, target) => {
+    renderCardHtml(html, target);
+  },
+});
+
 let domContentLoadedFired = document.readyState === 'complete';
 
 if (!domContentLoadedFired) {
@@ -177,54 +198,24 @@ function clearPendingRefreshTimers() {
   appState.pendingRefreshTimers.clear();
 }
 
-function restoreElementAttribute(element, name, value) {
-  if (value === null || value === undefined || value === '') element.removeAttribute(name);
-  else element.setAttribute(name, value);
-}
-
-function restoreHostDocumentState() {
-  document.documentElement.className = hostDocumentBaseline.htmlClassName || '';
-  restoreElementAttribute(document.documentElement, 'style', hostDocumentBaseline.htmlStyle);
-  document.body.className = hostDocumentBaseline.bodyClassName || '';
-  restoreElementAttribute(document.body, 'style', hostDocumentBaseline.bodyStyle);
-}
-
-function isInsideHostRoot(node) {
-  if (!root || node.nodeType !== Node.ELEMENT_NODE) return false;
-  const element = node;
-  return element === root || root.contains(element) || element.contains(root);
-}
-
-function rememberCardArtifact(node) {
-  if (node.nodeType !== Node.ELEMENT_NODE || isInsideHostRoot(node)) return;
-  appState.cardArtifactNodes.add(node);
-}
-
 function cleanupCardArtifacts() {
-  appState.cardArtifactObserver?.disconnect();
-  appState.cardArtifactObserver = null;
-
-  appState.cardArtifactNodes.forEach(node => {
-    if (node.isConnected) node.remove();
-  });
-  appState.cardArtifactNodes.clear();
-
-  document
-    .querySelectorAll('[data-conclave-card-head="true"], script[data-conclave-card-script]')
-    .forEach(node => node.remove());
-  restoreHostDocumentState();
+  // PR-08: ScriptRunner owns observer + artifact nodes + host document restore.
+  scriptRunner.cleanupArtifacts();
 }
 
 function beginCardArtifactTracking() {
-  appState.cardArtifactObserver?.disconnect();
-  const observer = new MutationObserver(mutations => {
-    mutations.forEach(mutation => {
-      mutation.addedNodes.forEach(rememberCardArtifact);
-    });
+  scriptRunner.beginCardArtifactTracking();
+}
+
+/**
+ * Session-scoped storage namespace for card scripts.
+ * @returns {string}
+ */
+function currentCardStorageNamespace() {
+  return buildStorageNamespace({
+    sessionId: store.getSessionEpoch() || 'default',
+    importId: store.getCurrentWorldbookId() ?? 'current',
   });
-  observer.observe(document.head, { childList: true });
-  observer.observe(document.body, { childList: true });
-  appState.cardArtifactObserver = observer;
 }
 
 /**
@@ -249,14 +240,19 @@ function showOpeningView() {
 
   appState.activeView = 'opening';
   appState.openingMessageNode = null;
-  messageArea.innerHTML = '';
+  // Clear prior mount nodes on view re-entry / card switch (PR-08).
+  messageMount.teardown();
 
   const runtime = ensureRuntime();
   const message = runtime.runtimeState.messages[0];
   const swipeId = Number.isFinite(Number(message?.swipe_id)) ? Number(message.swipe_id) : 0;
   const rendered = Array.isArray(message?.rendered_swipes) ? message.rendered_swipes[swipeId] : '';
-  appendAssistantMessage(messageArea, rendered || message?.message || store.getOpeningRenderedMessages()[0] || '', {
-    opening: true,
+  const html =
+    rendered || message?.message || store.getOpeningRenderedMessages()[0] || '';
+  messageMount.mountOpening(html, {
+    onMounted: node => {
+      appState.openingMessageNode = node;
+    },
   });
   renderOpeningSwipeControls();
   updateShellViewState();
@@ -1176,69 +1172,27 @@ function ensureRuntime() {
 }
 
 async function executeTavernHelperScripts() {
-  const runId = ++appState.tavernHelperRunId;
-  const scripts = store.getTavernHelperScripts().filter(script => String(script.content || '').trim());
-  if (!scripts.length) return;
-
-  ensureRuntime();
-
-  for (const scriptPart of scripts) {
-    if (runId !== appState.tavernHelperRunId) return;
-    const label = scriptPart.name || `TavernHelper script ${scriptPart.index ?? ''}`;
-    const source = `${scriptPart.content}\n//# sourceURL=conclave-tavern-helper-${runId}-${scriptPart.index ?? 'script'}.mjs`;
-    const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
-
-    try {
-      await import(/* @vite-ignore */ url);
-      console.debug('[ConclaveSTHost] TavernHelper script loaded:', label);
-    } catch (error) {
-      console.warn('[ConclaveSTHost] TavernHelper script failed:', label, error);
-    } finally {
-      URL.revokeObjectURL(url);
-    }
-  }
-
-  const liveRuntime = store.getRuntime();
-  if (runId === appState.tavernHelperRunId && liveRuntime) {
-    const data = clone(liveRuntime.runtimeState.mvuData || {});
-    await liveRuntime.eventEmit?.(window.Mvu?.events?.VARIABLE_UPDATE_ENDED || 'mag_variable_update_ended', data, data);
-  }
-}
-
-function executeScripts(scripts) {
-  const runId = ++appState.scriptRunId;
-  scripts.forEach(scriptPart => {
-    if (scriptPart.src && /jquery/i.test(scriptPart.src)) return;
-    const script = document.createElement('script');
-    script.dataset.conclaveCardScript = String(runId);
-    if (scriptPart.type) script.type = scriptPart.type;
-    if (scriptPart.src) script.src = scriptPart.src;
-    else script.textContent = cardScriptContentWithCompatibilityPrelude(scriptPart);
-    document.body.appendChild(script);
+  const scripts = store.getTavernHelperScripts();
+  await scriptRunner.runTavernHelper(scripts, {
+    ensureRuntime,
+    getRuntime: () => store.getRuntime(),
+    onComplete: async (liveRuntime, runId) => {
+      if (!liveRuntime) return;
+      if (runId !== scriptRunner.getTavernHelperRunId()) return;
+      const data = clone(liveRuntime.runtimeState.mvuData || {});
+      await liveRuntime.eventEmit?.(
+        window.Mvu?.events?.VARIABLE_UPDATE_ENDED || 'mag_variable_update_ended',
+        data,
+        data,
+      );
+    },
   });
 }
 
-function cardScriptContentWithCompatibilityPrelude(scriptPart) {
-  const content = scriptPart.content || '';
-  if (!String(scriptPart.type || '').includes('module') || !/\b(?:localStorage|indexedDB)\b/.test(content)) {
-    return content;
-  }
-
-  const cardKey = `${store.getCurrentWorldbookId() ?? 'current'}:${store.getCardName() || 'default'}`;
-  const namespace = JSON.stringify(`conclave:card:${cardKey}:`);
-
-  return `
-    const localStorage = window.__conclaveCreateScopedLocalStorage(${namespace});
-    const indexedDB = window.__conclaveCreateScopedIndexedDB(${namespace});
-    const BroadcastChannel = window.BroadcastChannel
-      ? class ConclaveScopedBroadcastChannel extends window.BroadcastChannel {
-        constructor(name) {
-          super(${namespace} + 'BroadcastChannel:' + String(name));
-        }
-      }
-      : undefined;
-    ${content}
-  `;
+function executeScripts(scripts) {
+  scriptRunner.runInlineHtmlScripts(scripts, {
+    namespace: currentCardStorageNamespace(),
+  });
 }
 
 function renderCardHtml(htmlContent, target) {
@@ -1411,10 +1365,15 @@ kernel = createSessionKernel({
   hooks: {
     clearPendingRefreshTimers,
     cleanupCardArtifacts,
+    // PR-08: SessionKernel tearing_down → ScriptRunner.abort then artifact cleanup.
+    abortScripts: () => scriptRunner.abort(),
     onTeardown() {
-      // Invalidate in-flight TH scripts and drop opening DOM handles.
-      appState.tavernHelperRunId += 1;
-      appState.scriptRunId += 1;
+      // Clear MessageMount DOM and drop opening handles (idempotent).
+      try {
+        messageMount.teardown();
+      } catch (error) {
+        console.warn('[ConclaveSTHost] messageMount.teardown error:', error);
+      }
       appState.activeView = 'opening';
       appState.openingMessageNode = null;
     },

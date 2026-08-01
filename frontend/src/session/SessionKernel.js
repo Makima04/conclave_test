@@ -42,7 +42,8 @@ export const SESSION_PHASE_TRANSITIONS = {
  * @typedef {Object} SessionKernelHooks
  * @property {() => void} clearPendingRefreshTimers
  * @property {() => void} cleanupCardArtifacts
- * @property {() => void} [onTeardown]  // e.g. bump tavernHelperRunId, clear UI nodes
+ * @property {() => void} [abortScripts]  // PR-08: ScriptRunner.abort — cancel pending TH/inline runs
+ * @property {() => void} [onTeardown]  // e.g. MessageMount.teardown, clear UI handles
  * @property {() => void} renderShell
  * @property {() => void} beginCardArtifactTracking
  * @property {() => void} showOpeningView
@@ -106,6 +107,7 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
   const {
     clearPendingRefreshTimers,
     cleanupCardArtifacts,
+    abortScripts,
     onTeardown,
     renderShell,
     beginCardArtifactTracking,
@@ -185,6 +187,15 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
       toIdle,
     });
 
+    // PR-08: cancel pending ScriptRunner work first so async TH imports stop ASAP.
+    if (typeof abortScripts === 'function') {
+      try {
+        abortScripts();
+      } catch (error) {
+        console.warn('[SessionKernel] abortScripts error:', error);
+      }
+    }
+
     if (typeof clearPendingRefreshTimers === 'function') {
       clearPendingRefreshTimers();
     }
@@ -233,6 +244,20 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
     const message = error instanceof Error ? error.message : String(error);
     store.setLastError(message);
     const runtime = store.getRuntime();
+    if (typeof abortScripts === 'function') {
+      try {
+        abortScripts();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (typeof cleanupCardArtifacts === 'function') {
+      try {
+        cleanupCardArtifacts();
+      } catch {
+        /* ignore */
+      }
+    }
     try {
       if (runtime?.capabilityRegistry && typeof runtime.capabilityRegistry.teardown === 'function') {
         void runtime.capabilityRegistry.teardown();
@@ -242,7 +267,19 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
     } catch {
       /* ignore */
     }
+    try {
+      runtime?.eventBus?.clear?.();
+    } catch {
+      /* ignore */
+    }
     store.clearRuntime();
+    if (typeof onTeardown === 'function') {
+      try {
+        onTeardown();
+      } catch {
+        /* ignore */
+      }
+    }
     transitionTo('error');
     if (showUi && typeof showError === 'function') {
       showError(message);

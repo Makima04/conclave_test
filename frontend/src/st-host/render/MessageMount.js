@@ -56,6 +56,7 @@ export function createMessageMount({ getRoot, renderHtmlInto }) {
 
   /**
    * Remove tracked mounts and clear the root.
+   * Idempotent: safe to call repeatedly (card switch / double-teardown).
    */
   function clear() {
     for (const node of mounted) {
@@ -72,9 +73,18 @@ export function createMessageMount({ getRoot, renderHtmlInto }) {
     }
   }
 
+  /**
+   * Lifecycle alias for SessionKernel / card-switch teardown (PR-08).
+   * Clears message DOM owned by this mount.
+   */
+  function teardown() {
+    clear()
+  }
+
   return {
     mountOpening,
     refreshMessageNode,
     clear,
+    teardown,
   }
 }

@@ -179,7 +179,7 @@ describe('isDisplayRegexFeEnabled', () => {
 })
 
 describe('createMessageMount (smoke)', () => {
-  it('exposes mountOpening / refreshMessageNode / clear', () => {
+  it('exposes mountOpening / refreshMessageNode / clear / teardown', () => {
     const root = {
       children: [],
       appendChild(n) {
@@ -224,6 +224,13 @@ describe('createMessageMount (smoke)', () => {
 
     mount.clear()
     expect(root.innerHTML).toBe('')
+
+    // PR-08: teardown clears mount nodes and is double-safe.
+    const node2 = mount.mountOpening('<span>again</span>')
+    expect(node2.innerHTML).toBe('<span>again</span>')
+    mount.teardown()
+    expect(root.innerHTML).toBe('')
+    expect(() => mount.teardown()).not.toThrow()
 
     vi.unstubAllGlobals()
   })
