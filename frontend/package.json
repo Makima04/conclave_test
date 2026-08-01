@@ -11,8 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cards": "vitest run tests/realCards.matrix.test.js tests/realCards.host.integration.test.js tests/display-golden.test.js",
-    "golden:refresh": "node ../scripts/golden-refresh.mjs && node ../scripts/real-card-fingerprints.mjs",
-    "golden:check": "node ../scripts/golden-refresh.mjs --check && node ../scripts/real-card-fingerprints.mjs --check",
+    "golden:refresh": "node ../scripts/golden-refresh.mjs && node ../scripts/real-card-fingerprints.mjs && node ../scripts/real-card-regex-inventory.mjs",
+    "golden:check": "node ../scripts/golden-refresh.mjs --check && node ../scripts/real-card-fingerprints.mjs --check && node ../scripts/real-card-regex-inventory.mjs --check",
     "preview": "vite preview"
   },
   "dependencies": {

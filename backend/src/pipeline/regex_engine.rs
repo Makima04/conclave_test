@@ -60,7 +60,7 @@ fn apply_scripts_for_stage(text: &str, scripts: &[RegexScript], stage: RegexStag
         if let Ok(re) = Regex::new(&format!("{}{}", regex_prefix, clean_regex)) {
             result = re
                 .replace_all(&result, |captures: &Captures| {
-                    expand_replacement(&script.replace_string, captures)
+                    expand_replacement(&script.replace_string, captures, &script.trim_strings)
                 })
                 .to_string();
         }
@@ -80,10 +80,28 @@ fn should_run_script(script: &RegexScript, stage: &RegexStage) -> bool {
     }
 }
 
-fn expand_replacement(template: &str, captures: &Captures<'_>) -> String {
+/// ST filterString: remove each trim token from a capture value.
+fn filter_trim_strings(raw: &str, trim_strings: &[String]) -> String {
+    let mut final_string = raw.to_string();
+    for trim in trim_strings {
+        if trim.is_empty() {
+            continue;
+        }
+        final_string = final_string.replace(trim.as_str(), "");
+    }
+    final_string
+}
+
+fn push_capture(output: &mut String, value: &str, trim_strings: &[String]) {
+    output.push_str(&filter_trim_strings(value, trim_strings));
+}
+
+/// Expand `$n` / `$&` / `$0` / `${name}` / `$<name>` with optional ST trimStrings on captures.
+fn expand_replacement(template: &str, captures: &Captures<'_>, trim_strings: &[String]) -> String {
     let mut output = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     let capture_count = captures.len().saturating_sub(1);
+    let full = captures.get(0).map_or("", |matched| matched.as_str());
 
     while let Some(ch) = chars.next() {
         if ch != '$' {
@@ -98,7 +116,54 @@ fn expand_replacement(template: &str, captures: &Captures<'_>) -> String {
             }
             Some('&') => {
                 chars.next();
-                output.push_str(captures.get(0).map_or("", |matched| matched.as_str()));
+                push_capture(&mut output, full, trim_strings);
+            }
+            // ST: $<name>
+            Some('<') => {
+                chars.next();
+                let mut name = String::new();
+                let mut closed = false;
+                for next in chars.by_ref() {
+                    if next == '>' {
+                        closed = true;
+                        break;
+                    }
+                    name.push(next);
+                }
+                if closed {
+                    if let Some(matched) = captures.name(&name) {
+                        push_capture(&mut output, matched.as_str(), trim_strings);
+                    }
+                    // missing named group → empty (ST)
+                } else {
+                    output.push_str("$<");
+                    output.push_str(&name);
+                }
+            }
+            Some('0') => {
+                // $0 full match; $0N multi-digit via ST Number semantics handled loosely
+                chars.next();
+                if let Some(second) = chars.peek().copied().filter(|c| c.is_ascii_digit()) {
+                    let second_index = second.to_digit(10).unwrap() as usize;
+                    // $0X → treat as group X when X>0 and exists (ST Number("0X")=X)
+                    if second_index > 0 && second_index <= capture_count {
+                        chars.next();
+                        push_capture(
+                            &mut output,
+                            captures
+                                .get(second_index)
+                                .map_or("", |matched| matched.as_str()),
+                            trim_strings,
+                        );
+                    } else if second_index == 0 {
+                        chars.next();
+                        push_capture(&mut output, full, trim_strings);
+                    } else {
+                        chars.next();
+                    }
+                } else {
+                    push_capture(&mut output, full, trim_strings);
+                }
             }
             Some('1'..='9') => {
                 let first_digit = chars.next().unwrap();
@@ -110,20 +175,24 @@ fn expand_replacement(template: &str, captures: &Captures<'_>) -> String {
                     let two_digit_index = first_index * 10 + second_index;
                     if two_digit_index <= capture_count {
                         chars.next();
-                        output.push_str(
+                        push_capture(
+                            &mut output,
                             captures
                                 .get(two_digit_index)
                                 .map_or("", |matched| matched.as_str()),
+                            trim_strings,
                         );
                         continue;
                     }
                 }
 
                 if first_index <= capture_count {
-                    output.push_str(
+                    push_capture(
+                        &mut output,
                         captures
                             .get(first_index)
                             .map_or("", |matched| matched.as_str()),
+                        trim_strings,
                     );
                 } else {
                     output.push('$');
@@ -144,8 +213,9 @@ fn expand_replacement(template: &str, captures: &Captures<'_>) -> String {
 
                 if closed {
                     if let Some(matched) = captures.name(&name) {
-                        output.push_str(matched.as_str());
+                        push_capture(&mut output, matched.as_str(), trim_strings);
                     } else {
+                        // Keep ${name} for JS template literals in replace strings
                         output.push_str("${");
                         output.push_str(&name);
                         output.push('}');
@@ -254,12 +324,53 @@ mod tests {
             markdown_only: false,
             prompt_only: false,
             disabled: false,
+            trim_strings: vec![],
         };
 
         let output = RegexPipeline::process("{{GameStart}}", &[script]);
 
         assert!(output.contains("const $fabaoGrid = $('#cx-fabao-grid');"));
         assert!(output.contains("`${fb.id}`"));
+    }
+
+    #[test]
+    fn replacement_expands_dollar_zero_full_match() {
+        let script = RegexScript {
+            id: String::new(),
+            script_name: "full".to_string(),
+            run_on_edit: false,
+            find_regex: "/foo/g".to_string(),
+            replace_string: "[$0]".to_string(),
+            placement: Vec::new(),
+            substitute_regex: 0,
+            min_depth: None,
+            max_depth: None,
+            markdown_only: false,
+            prompt_only: false,
+            disabled: false,
+            trim_strings: vec![],
+        };
+        assert_eq!(RegexPipeline::process("foo bar foo", &[script]), "[foo] bar [foo]");
+    }
+
+    #[test]
+    fn replacement_applies_trim_strings_to_captures() {
+        let script = RegexScript {
+            id: String::new(),
+            script_name: "trim".to_string(),
+            run_on_edit: false,
+            find_regex: "/\\[(.+)\\]/g".to_string(),
+            replace_string: "($1)".to_string(),
+            placement: Vec::new(),
+            substitute_regex: 0,
+            min_depth: None,
+            max_depth: None,
+            markdown_only: false,
+            prompt_only: false,
+            disabled: false,
+            trim_strings: vec!["x".to_string()],
+        };
+        assert_eq!(RegexPipeline::process("[axb]", &[script]), "(ab)");
     }
 
     #[test]
@@ -277,6 +388,7 @@ mod tests {
             markdown_only: false,
             prompt_only: false,
             disabled: false,
+            trim_strings: vec![],
         };
 
         let output = RegexPipeline::process("【沈慕微】：“不是我。”", &[script]);
@@ -303,6 +415,7 @@ mod tests {
             markdown_only: false,
             prompt_only: false,
             disabled: false,
+            trim_strings: vec![],
         };
 
         let output = RegexPipeline::process("abcdefghij", &[script]);
@@ -325,6 +438,7 @@ mod tests {
             markdown_only: false,
             prompt_only: true,
             disabled: false,
+            trim_strings: vec![],
         };
         let display_ui = RegexScript {
             id: String::new(),
@@ -339,6 +453,7 @@ mod tests {
             markdown_only: true,
             prompt_only: false,
             disabled: false,
+            trim_strings: vec![],
         };
 
         let output = RegexPipeline::process(
@@ -366,6 +481,7 @@ mod tests {
             markdown_only: true,
             prompt_only: true,
             disabled: false,
+            trim_strings: vec![],
         };
 
         let output = RegexPipeline::process(
@@ -393,6 +509,7 @@ mod tests {
                 markdown_only: true,
                 prompt_only: false,
                 disabled: false,
+                trim_strings: vec![],
             }],
         );
         let unlabeled_html = RegexPipeline::process(
@@ -410,6 +527,7 @@ mod tests {
                 markdown_only: true,
                 prompt_only: false,
                 disabled: false,
+                trim_strings: vec![],
             }],
         );
 
@@ -436,6 +554,7 @@ mod tests {
                 markdown_only: true,
                 prompt_only: false,
                 disabled: false,
+                trim_strings: vec![],
             }],
         );
 

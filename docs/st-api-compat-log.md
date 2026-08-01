@@ -629,3 +629,32 @@
     - `#app` 已由卡片脚本填充。
     - 出现卡片自带标题页按钮：`新建角色 →`、`读取存档`。
     - 刷新后新增 warn/error 日志为空。
+
+## 2026-08-01 — ST scoped regex_scripts multi-card parity
+
+### ST 源码事实（CodeGraph）
+
+- 卡内正则存于 `data.extensions.regex_scripts`（SCOPED）。
+- 引擎：`public/scripts/extensions/regex/engine.js`
+  - `getScriptsByType(SCOPED)` → 当前角色 `characters[chid].data.extensions.regex_scripts`
+  - `getRegexedString` / `runRegexScript`：placement、markdownOnly/promptOnly、depth、`trimStrings`、`substituteRegex`、`{{match}}`→`$0`、`$n` / `$<name>`
+- 全局 / 预设脚本另存，不跟单张导出卡走；真卡差异主要来自 **scoped** 列表。
+
+### 四套真卡 inventory（tracked）
+
+| id | total | display AI_OUTPUT | 备注 |
+|----|------:|------------------:|------|
+| cangxuan | 21 | 9 | 开场白 HTML、对话气泡、状态栏… |
+| dahuang-z | 17 | 11 | 思维链/变量美化、全能面板… |
+| bianshen-shaonu | 5 | 3 | 状态栏 + 正文美化 |
+| luren-nvzhu | 1 | 1 | 仅「替换开局」 |
+
+全部 `substituteRegex=0` 且 `trimStrings` 为空；引擎仍补齐 ST 边角以免未来卡踩坑。
+
+### Conclave 实现
+
+- FE `RegexEngine`：`trimStrings`、`$0`、`$<name>`、placement 数值强制、`substituteRegex` RAW/ESCAPED（需 macros/characterOverride）
+- Oracle 改为 re-export FE `processDisplay`（消灭双实现漂移）
+- BE `RegexScript.trim_strings` + expand `$0` / `$<name>` + trim
+- `scripts/real-card-regex-inventory.mjs` + golden `fixtures/golden/real-regex-inventory/inventory.json`
+- matrix 断言：各卡 display signature 互不相同（防单卡特化）

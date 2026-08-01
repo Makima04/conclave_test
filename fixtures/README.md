@@ -25,10 +25,14 @@ scan them (`listOptionalImportedCards`) without committing user imports.
 |-------|-----------|
 | Matrix | Every card: `processDisplay(first_mes + greetings)` no throw; FE == ST oracle |
 | Fingerprints | `fixtures/golden/real-openings/<id>.json` sha256 of normalized opening HTML |
+| Regex inventory | `fixtures/golden/real-regex-inventory/inventory.json` — per-card ST `data.extensions.regex_scripts` display signature (must differ across cards) |
 | Host switch | Load A→B→C→D: epoch, name, regex count, **messages reset**, no chat bleed |
 | Cross-card | Opening of card A does not inject other cards’ names; scripts come from **current** card |
 | Backend | import/select each real card; `regex_scripts` / `first_message` follow selection |
 | Rule goldens | Tiny ST rules only (`golden/display/*`) — placement / promptOnly / depth |
+
+**ST fact:** each card embeds scoped scripts at `data.extensions.regex_scripts`. The host runs
+`getRegexedString` / `processDisplay` generically — never a per-card display fork.
 
 We **do not** freeze multi‑MB full HTML per card as the only gate; fingerprints catch drift.
 
@@ -38,6 +42,10 @@ We **do not** freeze multi‑MB full HTML per card as the only gate; fingerprint
 # Refresh real-card opening fingerprints (after intentional display changes)
 node scripts/real-card-fingerprints.mjs
 node scripts/real-card-fingerprints.mjs --check
+
+# Dump / check per-card ST regex_scripts inventory (anti single-card specialization)
+node scripts/real-card-regex-inventory.mjs
+node scripts/real-card-regex-inventory.mjs --check
 
 # ST rule goldens only
 node scripts/golden-refresh.mjs --check

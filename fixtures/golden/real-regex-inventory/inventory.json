@@ -1,0 +1,160 @@
+{
+  "generated": "2026-08-01",
+  "st_source": "data.extensions.regex_scripts (SCOPED) via ST Regex extension engine.js",
+  "note": "Each card ships its own display scripts; host must only execute, not hardcode one card.",
+  "cards": [
+    {
+      "id": "bianshen-shaonu",
+      "name": "变身少女的绝对隶属调教日记-专属于魔女的玩物人偶",
+      "total": 5,
+      "display_ai_output": 3,
+      "by_class": {
+        "disabled": 1,
+        "no_placement": 0,
+        "prompt_only": 1,
+        "markdown_only": 2,
+        "source": 0,
+        "mixed_md_prompt": 1
+      },
+      "display_script_names": [
+        "对ai隐藏变量更新",
+        "正文美化-夜间",
+        "状态栏美化"
+      ],
+      "all_script_names": [
+        "对ai隐藏状态栏",
+        "对ai隐藏变量更新",
+        "正文美化-粉白",
+        "正文美化-夜间",
+        "状态栏美化"
+      ],
+      "non_empty_trim_strings": 0,
+      "non_zero_substitute_regex": 0,
+      "display_signature": "对ai隐藏变量更新|正文美化-夜间|状态栏美化"
+    },
+    {
+      "id": "cangxuan",
+      "name": "苍玄界",
+      "total": 21,
+      "display_ai_output": 9,
+      "by_class": {
+        "disabled": 8,
+        "no_placement": 0,
+        "prompt_only": 4,
+        "markdown_only": 9,
+        "source": 0,
+        "mixed_md_prompt": 0
+      },
+      "display_script_names": [
+        "开场白",
+        "对话美化（气泡版）",
+        "心声美化",
+        "状态栏美化",
+        "小索思考完成",
+        "小索思考中",
+        "不发送插图",
+        "天道审查美化",
+        "防隐藏状态栏占位"
+      ],
+      "all_script_names": [
+        "开场白",
+        "对话美化（气泡版）",
+        "心声美化",
+        "悬赏接取美化",
+        "拍卖购入美化",
+        "盲盒开启美化",
+        "道友收录美化",
+        "悬赏完成美化",
+        "飞剑传书回信美化",
+        "自由开局美化",
+        "只发送最新3楼的变量更新",
+        "状态栏美化",
+        "仅格式思维链",
+        "对 AI 隐藏状态栏",
+        "小索思考完成",
+        "小索思考中",
+        "插图",
+        "不发送插图",
+        "天道审查美化",
+        "[不发送]去除变量更新",
+        "防隐藏状态栏占位"
+      ],
+      "non_empty_trim_strings": 0,
+      "non_zero_substitute_regex": 0,
+      "display_signature": "开场白|对话美化（气泡版）|心声美化|状态栏美化|小索思考完成|小索思考中|不发送插图|天道审查美化|防隐藏状态栏占位"
+    },
+    {
+      "id": "dahuang-z",
+      "name": "大荒z",
+      "total": 17,
+      "display_ai_output": 11,
+      "by_class": {
+        "disabled": 1,
+        "no_placement": 0,
+        "prompt_only": 5,
+        "markdown_only": 9,
+        "source": 0,
+        "mixed_md_prompt": 2
+      },
+      "display_script_names": [
+        "0清理思维链内标签（出自泉此方）",
+        "1美化最近二层思维链(流式夜间)-修复换行（出自泉此方）",
+        "[美化]变量更新中",
+        "[美化]完整变量更新",
+        "大荒志·全能面板 (移动端适配版)",
+        "状态栏",
+        "[UI]小宅仙专属UI_Fix",
+        "防止ai犯蠢输出",
+        "去战斗检定（喜欢看可以开）",
+        "防污染",
+        "正文UI>普通字体版"
+      ],
+      "all_script_names": [
+        "0清理思维链内标签（出自泉此方）",
+        "1美化最近二层思维链(流式夜间)-修复换行（出自泉此方）",
+        "清理思维链标签，防止非泉此方预设",
+        "[不发送]去除变量更新",
+        "[美化]变量更新中",
+        "[不发送]状态栏",
+        "[美化]完整变量更新",
+        "去开场白代码、防止未来楼层重复出现",
+        "大荒志·全能面板 (移动端适配版)",
+        "状态栏",
+        "2楼外HTML清理",
+        "[UI]小宅仙专属UI_Fix",
+        "防止ai犯蠢输出",
+        "去战斗检定（喜欢看可以开）",
+        "防污染",
+        "正文UI>楷书版",
+        "正文UI>普通字体版"
+      ],
+      "non_empty_trim_strings": 0,
+      "non_zero_substitute_regex": 0,
+      "display_signature": "0清理思维链内标签（出自泉此方）|1美化最近二层思维链(流式夜间)-修复换行（出自泉此方）|[美化]变量更新中|[美化]完整变量更新|大荒志·全能面板 (移动端适配版)|状态栏|[UI]小宅仙专属UI_Fix|防止ai犯蠢输出|去战斗检定（喜欢看可以开）|防污染|正文UI>普通字体版"
+    },
+    {
+      "id": "luren-nvzhu",
+      "name": "路人女主的养成方法测试版v0.09",
+      "total": 1,
+      "display_ai_output": 1,
+      "by_class": {
+        "disabled": 0,
+        "no_placement": 0,
+        "prompt_only": 0,
+        "markdown_only": 1,
+        "source": 0,
+        "mixed_md_prompt": 0
+      },
+      "display_script_names": [
+        "替换开局"
+      ],
+      "all_script_names": [
+        "替换开局"
+      ],
+      "non_empty_trim_strings": 0,
+      "non_zero_substitute_regex": 0,
+      "display_signature": "替换开局"
+    }
+  ],
+  "unique_display_signatures": 4
+}

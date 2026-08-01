@@ -181,6 +181,9 @@ pub struct RegexScript {
     pub markdown_only: bool,
     #[serde(default, rename = "promptOnly")]
     pub prompt_only: bool,
+    /// ST: strings stripped from each expanded capture ($n / $<name>) before insert.
+    #[serde(default, rename = "trimStrings")]
+    pub trim_strings: Vec<String>,
 }
 
 /// TavernHelper 脚本（通常来自 data.extensions.tavern_helper.scripts）

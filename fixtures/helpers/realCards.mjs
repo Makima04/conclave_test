@@ -129,6 +129,100 @@ export function cardRegexScripts(card) {
   return Array.isArray(scripts) ? scripts : []
 }
 
+/** ST regex_placement.AI_OUTPUT */
+export const AI_OUTPUT_PLACEMENT = 2
+
+/**
+ * Classify a scoped regex script for multi-card inventory (ST stages).
+ * @param {object} script
+ * @returns {'disabled'|'no_placement'|'prompt_only'|'markdown_only'|'source'|'mixed_md_prompt'}
+ */
+export function classifyRegexScript(script) {
+  if (!script) return 'disabled'
+  if (script.disabled) return 'disabled'
+  const pl = Array.isArray(script.placement) ? script.placement.map(Number) : []
+  if (pl.length === 0) return 'no_placement'
+  const md = !!script.markdownOnly
+  const po = !!script.promptOnly
+  if (md && po) return 'mixed_md_prompt'
+  if (md) return 'markdown_only'
+  if (po) return 'prompt_only'
+  return 'source'
+}
+
+/**
+ * Display-relevant scripts for AI_OUTPUT (what processDisplay may run).
+ * Includes markdown_only + source (not prompt_only-only, unless also markdownOnly).
+ *
+ * @param {object} card
+ * @param {{ placement?: number }} [opts]
+ * @returns {object[]}
+ */
+export function cardDisplayRegexScripts(card, opts = {}) {
+  const placement = opts.placement ?? AI_OUTPUT_PLACEMENT
+  return cardRegexScripts(card).filter((s) => {
+    if (!s || s.disabled) return false
+    const pl = Array.isArray(s.placement) ? s.placement.map(Number) : []
+    if (!pl.includes(Number(placement))) return false
+    // prompt-only without markdown never runs on display source/md stages
+    if (s.promptOnly && !s.markdownOnly) return false
+    return true
+  })
+}
+
+/**
+ * Human/CI inventory of per-card regex (anti single-card specialization evidence).
+ *
+ * @param {object} card
+ * @param {{ id?: string, name?: string }} [meta]
+ */
+export function summarizeCardRegex(card, meta = {}) {
+  const all = cardRegexScripts(card)
+  const byClass = {
+    disabled: 0,
+    no_placement: 0,
+    prompt_only: 0,
+    markdown_only: 0,
+    source: 0,
+    mixed_md_prompt: 0,
+  }
+  const display = cardDisplayRegexScripts(card)
+  const displayNames = []
+  const allNames = []
+  let nonEmptyTrim = 0
+  let nonZeroSubstitute = 0
+
+  for (const s of all) {
+    const cls = classifyRegexScript(s)
+    byClass[cls] = (byClass[cls] || 0) + 1
+    allNames.push(String(s.scriptName || s.id || '(unnamed)'))
+    const trim = s.trimStrings
+    if (Array.isArray(trim) && trim.some((t) => t != null && String(t) !== '')) {
+      nonEmptyTrim += 1
+    }
+    if (s.substituteRegex != null && Number(s.substituteRegex) !== 0) {
+      nonZeroSubstitute += 1
+    }
+  }
+  for (const s of display) {
+    displayNames.push(String(s.scriptName || s.id || '(unnamed)'))
+  }
+
+  return {
+    id: meta.id ?? null,
+    name: meta.name ?? cardName(card),
+    total: all.length,
+    display_ai_output: display.length,
+    by_class: byClass,
+    display_script_names: displayNames,
+    all_script_names: allNames,
+    non_empty_trim_strings: nonEmptyTrim,
+    non_zero_substitute_regex: nonZeroSubstitute,
+    /** Stable signature of enabled display script names (order preserved) */
+    display_signature: displayNames.join('|'),
+  }
+}
+
 export function cardTavernHelperScripts(card) {
   const scripts = card?.data?.extensions?.tavern_helper?.scripts
   return Array.isArray(scripts) ? scripts : []

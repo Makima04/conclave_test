@@ -1,6 +1,7 @@
 /**
- * Display-side regex engine aligned with SillyTavern getRegexedString rules
- * and Rust expand_replacement ($n golden).
+ * Display-side regex engine aligned with SillyTavern getRegexedString /
+ * runRegexScript (public/scripts/extensions/regex/engine.js) and Rust
+ * expand_replacement ($n golden, $fabaoGrid safety).
  *
  * @module st-host/render/RegexEngine
  */
@@ -16,6 +17,16 @@ export const regex_placement = {
 }
 
 /**
+ * ST substitute_find_regex
+ * @readonly
+ */
+export const substitute_find_regex = {
+  NONE: 0,
+  RAW: 1,
+  ESCAPED: 2,
+}
+
+/**
  * @typedef {Object} RegexScript
  * @property {string} [id]
  * @property {string} [scriptName]
@@ -28,7 +39,8 @@ export const regex_placement = {
  * @property {boolean} [runOnEdit]
  * @property {number|null} [minDepth]
  * @property {number|null} [maxDepth]
- * @property {number} [substituteRegex]  // warn only if non-zero for P1
+ * @property {number} [substituteRegex]
+ * @property {string[]} [trimStrings]  ST: strip from each capture before insert
  */
 
 /** @type {Set<string>} */
@@ -72,7 +84,6 @@ export function parseFindRegex(findRegex) {
   if (!flags.includes('g')) flags += 'g'
 
   try {
-    // Validate constructibility
     void new RegExp(source, flags)
     return { source, flags }
   } catch {
@@ -81,19 +92,92 @@ export function parseFindRegex(findRegex) {
 }
 
 /**
- * Rust-compatible `$` expansion: `$$`, `$&`, `$1`–`$99` (two-digit only when
- * that group exists), `${name}` named groups. Bare `$fabao…` stays `$` + rest.
- *
- * @param {string} template
- * @param {string} match  full match ($&)
- * @param {Array<string|undefined>} groups  $1.. at indices 0..
- * @param {Record<string, string>|undefined|null} namedGroups
+ * Escape a string for safe use inside a RegExp source (ST sanitizeRegexMacro-ish).
+ * @param {string} value
  * @returns {string}
  */
-export function expandReplacement(template, match, groups = [], namedGroups = undefined) {
+export function escapeRegExp(value) {
+  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Minimal ST substituteParams for trimStrings / findRegex macros.
+ * Supports {{char}}/{{charName}}/{{name}} (characterOverride) and {{user}}.
+ *
+ * @param {string} text
+ * @param {{ characterOverride?: string, userName?: string, macros?: Record<string, string> }} [ctx]
+ * @returns {string}
+ */
+export function substituteBasicParams(text, ctx = {}) {
+  let out = text == null ? '' : String(text)
+  const charName = ctx.characterOverride != null ? String(ctx.characterOverride) : ''
+  const userName = ctx.userName != null ? String(ctx.userName) : 'User'
+  const macros = ctx.macros && typeof ctx.macros === 'object' ? ctx.macros : {}
+
+  out = out.replace(/\{\{char(?:Name)?\}\}/gi, () => charName)
+  out = out.replace(/\{\{name\}\}/gi, () => charName)
+  out = out.replace(/\{\{user\}\}/gi, () => userName)
+  for (const [key, val] of Object.entries(macros)) {
+    if (!key) continue
+    const re = new RegExp(`\\{\\{${escapeRegExp(key)}\\}\\}`, 'gi')
+    out = out.replace(re, () => String(val ?? ''))
+  }
+  return out
+}
+
+/**
+ * ST filterString: remove each trimString (after macro sub) from a capture value.
+ *
+ * @param {string} rawString
+ * @param {string[]|undefined|null} trimStrings
+ * @param {{ characterOverride?: string, userName?: string, macros?: Record<string, string> }} [ctx]
+ * @returns {string}
+ */
+export function filterTrimStrings(rawString, trimStrings, ctx = {}) {
+  let finalString = rawString == null ? '' : String(rawString)
+  const list = Array.isArray(trimStrings) ? trimStrings : []
+  for (const trimString of list) {
+    if (trimString == null || trimString === '') continue
+    const sub = substituteBasicParams(String(trimString), ctx)
+    if (!sub) continue
+    finalString = finalString.split(sub).join('')
+  }
+  return finalString
+}
+
+/**
+ * Rust-compatible `$` expansion plus ST extras:
+ * - `$$` → `$`
+ * - `$&` / `$0` → full match
+ * - `$1`–`$99` (two-digit only when that group exists)
+ * - `${name}` and ST `$<name>` named groups
+ * - Bare `$fabao…` stays `$` + rest (JS safety)
+ * - Optional trimStrings applied only to expanded captures (ST filterString)
+ *
+ * @param {string} template
+ * @param {string} match  full match ($& / $0)
+ * @param {Array<string|undefined>} groups  $1.. at indices 0..
+ * @param {Record<string, string>|undefined|null} namedGroups
+ * @param {{ trimStrings?: string[], characterOverride?: string, userName?: string, macros?: Record<string, string> }} [options]
+ * @returns {string}
+ */
+export function expandReplacement(
+  template,
+  match,
+  groups = [],
+  namedGroups = undefined,
+  options = {},
+) {
   const tpl = template == null ? '' : String(template)
   const full = match == null ? '' : String(match)
   const captureCount = Array.isArray(groups) ? groups.length : 0
+  const trimCtx = {
+    characterOverride: options.characterOverride,
+    userName: options.userName,
+    macros: options.macros,
+  }
+  const trimList = options.trimStrings
+  const filterCap = (value) => filterTrimStrings(value, trimList, trimCtx)
 
   let output = ''
   let i = 0
@@ -119,12 +203,74 @@ export function expandReplacement(template, match, groups = [], namedGroups = un
     }
 
     if (next === '&') {
-      output += full
+      output += filterCap(full)
       i += 2
       continue
     }
 
-    if (next >= '1' && next <= '9') {
+    // ST: $<name>
+    if (next === '<') {
+      i += 2
+      let name = ''
+      let closed = false
+      while (i < tpl.length) {
+        const c = tpl[i]
+        i += 1
+        if (c === '>') {
+          closed = true
+          break
+        }
+        name += c
+      }
+      if (closed) {
+        if (namedGroups && Object.prototype.hasOwnProperty.call(namedGroups, name)) {
+          const v = namedGroups[name]
+          output += filterCap(v == null ? '' : String(v))
+        } else {
+          // ST returns '' for missing named group when matched by $<…>; keep token only if unclosed
+          output += ''
+        }
+      } else {
+        output += '$<'
+        output += name
+      }
+      continue
+    }
+
+    // $0 full match (ST {{match}} → $0); $1–$9 with optional two-digit
+    if (next >= '0' && next <= '9') {
+      if (next === '0') {
+        // $0 → full match; $0X with second digit: ST Number('0X') for multi-digit
+        const second = tpl[i + 2]
+        if (second !== undefined && second >= '0' && second <= '9') {
+          // multi-digit starting with 0: use Number like ST ($01 → group 1)
+          let j = i + 1
+          let numStr = ''
+          while (j < tpl.length && tpl[j] >= '0' && tpl[j] <= '9') {
+            numStr += tpl[j]
+            j += 1
+          }
+          const idx = Number(numStr)
+          if (idx === 0) {
+            output += filterCap(full)
+            i = j
+            continue
+          }
+          if (idx <= captureCount) {
+            const g = groups[idx - 1]
+            output += filterCap(g == null ? '' : String(g))
+            i = j
+            continue
+          }
+          // unknown group → empty (ST)
+          i = j
+          continue
+        }
+        output += filterCap(full)
+        i += 2
+        continue
+      }
+
       const firstDigit = next
       const firstIndex = Number(firstDigit)
       const second = tpl[i + 2]
@@ -132,14 +278,14 @@ export function expandReplacement(template, match, groups = [], namedGroups = un
         const twoDigitIndex = firstIndex * 10 + Number(second)
         if (twoDigitIndex <= captureCount) {
           const g = groups[twoDigitIndex - 1]
-          output += g == null ? '' : String(g)
+          output += filterCap(g == null ? '' : String(g))
           i += 3
           continue
         }
       }
       if (firstIndex <= captureCount) {
         const g = groups[firstIndex - 1]
-        output += g == null ? '' : String(g)
+        output += filterCap(g == null ? '' : String(g))
         i += 2
       } else {
         output += '$'
@@ -165,8 +311,9 @@ export function expandReplacement(template, match, groups = [], namedGroups = un
       if (closed) {
         if (namedGroups && Object.prototype.hasOwnProperty.call(namedGroups, name)) {
           const v = namedGroups[name]
-          output += v == null ? '' : String(v)
+          output += filterCap(v == null ? '' : String(v))
         } else {
+          // Keep ${name} for JS template literals in replace strings ($ {fb.id})
           output += '${'
           output += name
           output += '}'
@@ -184,6 +331,66 @@ export function expandReplacement(template, match, groups = [], namedGroups = un
   }
 
   return output
+}
+
+/**
+ * Resolve findRegex with ST substituteRegex modes.
+ * RAW/ESCAPED only apply when macros/characterOverride are provided; otherwise
+ * identity + one-time warn (current tracked real cards all use substituteRegex=0).
+ *
+ * @param {RegexScript} script
+ * @param {{ characterOverride?: string, userName?: string, macros?: Record<string, string> }} [ctx]
+ * @returns {string|null}
+ */
+export function resolveFindRegexString(script, ctx = {}) {
+  if (!script?.findRegex) return null
+  const mode = Number(script.substituteRegex ?? 0)
+  const raw = String(script.findRegex)
+
+  if (mode === substitute_find_regex.NONE || Number.isNaN(mode)) {
+    return raw
+  }
+
+  const hasMacros =
+    (ctx.characterOverride != null && String(ctx.characterOverride) !== '') ||
+    (ctx.userName != null && String(ctx.userName) !== '') ||
+    (ctx.macros && Object.keys(ctx.macros).length > 0)
+
+  if (!hasMacros) {
+    const warnKey = String(script.id || script.scriptName || script.findRegex || '?')
+    if (!substituteWarnedIds.has(warnKey)) {
+      substituteWarnedIds.add(warnKey)
+      console.warn(
+        `[ConclaveSTHost] substituteRegex=${mode} needs macros/characterOverride; using raw findRegex (script: ${warnKey})`,
+      )
+    }
+    return raw
+  }
+
+  if (mode === substitute_find_regex.RAW) {
+    return substituteBasicParams(raw, ctx)
+  }
+  if (mode === substitute_find_regex.ESCAPED) {
+    // ST substitutes macros with regex-sanitized values; we escape the whole substituted string's macro slots via per-macro escape
+    let out = raw
+    const charName = ctx.characterOverride != null ? String(ctx.characterOverride) : ''
+    const userName = ctx.userName != null ? String(ctx.userName) : 'User'
+    out = out.replace(/\{\{char(?:Name)?\}\}/gi, () => escapeRegExp(charName))
+    out = out.replace(/\{\{name\}\}/gi, () => escapeRegExp(charName))
+    out = out.replace(/\{\{user\}\}/gi, () => escapeRegExp(userName))
+    const macros = ctx.macros && typeof ctx.macros === 'object' ? ctx.macros : {}
+    for (const [key, val] of Object.entries(macros)) {
+      if (!key) continue
+      const re = new RegExp(`\\{\\{${escapeRegExp(key)}\\}\\}`, 'gi')
+      out = out.replace(re, () => escapeRegExp(String(val ?? '')))
+    }
+    return out
+  }
+
+  console.warn(
+    `[ConclaveSTHost] Unknown substituteRegex value ${mode}; using raw findRegex`,
+  )
+  return raw
 }
 
 /**
@@ -232,38 +439,33 @@ export function shouldRunScript(
     }
   }
 
-  // Empty placement array → skip (ST); non-empty must include placement
+  // Empty placement array → skip (ST); coerce numbers (card JSON may use strings)
   const pl = script.placement
   if (!Array.isArray(pl) || pl.length === 0) return false
-  if (!pl.includes(placement)) return false
-
-  // P1: substituteRegex macros not implemented — warn once per script id
-  if (script.substituteRegex != null && Number(script.substituteRegex) !== 0) {
-    const warnKey = String(script.id || script.scriptName || script.findRegex || '?')
-    if (!substituteWarnedIds.has(warnKey)) {
-      substituteWarnedIds.add(warnKey)
-      console.warn(
-        `[ConclaveSTHost] substituteRegex=${script.substituteRegex} not implemented for P1 (script: ${warnKey})`,
-      )
-    }
-  }
+  const placementNum = Number(placement)
+  if (!pl.map(Number).includes(placementNum)) return false
 
   return true
 }
 
 /**
- * Run a single regex script. Maps `{{match}}` → full match (ST) via `$&`.
+ * Run a single regex script. Maps `{{match}}` → full match (ST `$0`).
+ * Applies trimStrings to expanded captures (ST filterString).
  *
  * @param {RegexScript} script
  * @param {string} rawString
+ * @param {{ characterOverride?: string, userName?: string, macros?: Record<string, string> }} [ctx]
  * @returns {string}
  */
-export function runRegexScript(script, rawString) {
+export function runRegexScript(script, rawString, ctx = {}) {
   if (!script || script.disabled || !script.findRegex || !rawString) {
     return rawString
   }
 
-  const parsed = parseFindRegex(script.findRegex)
+  const findStr = resolveFindRegexString(script, ctx)
+  if (findStr == null) return rawString
+
+  const parsed = parseFindRegex(findStr)
   if (!parsed) return rawString
 
   let re
@@ -273,19 +475,25 @@ export function runRegexScript(script, rawString) {
     return rawString
   }
 
-  // {{match}} → $& for expandReplacement. Use function replacer so `$&` is literal.
-  const template = String(script.replaceString ?? '').replace(/\{\{match\}\}/gi, () => '$&')
+  // ST: {{match}} → $0 (full match via expandReplacement)
+  const template = String(script.replaceString ?? '').replace(/\{\{match\}\}/gi, () => '$0')
+  const expandOpts = {
+    trimStrings: script.trimStrings,
+    characterOverride: ctx.characterOverride,
+    userName: ctx.userName,
+    macros: ctx.macros,
+  }
 
   return rawString.replace(re, (...args) => {
     const m = args[0]
     const last = args[args.length - 1]
     const hasNamed = last != null && typeof last === 'object' && !Array.isArray(last)
     // Signature: match, g1, g2, ..., offset, string [, groups]
-    const fixedTail = hasNamed ? 3 : 2 // offset + string [+ groups]
+    const fixedTail = hasNamed ? 3 : 2
     const groupEnd = args.length - fixedTail
     const groups = args.slice(1, Math.max(groupEnd, 1))
     const namedGroups = hasNamed ? last : undefined
-    return expandReplacement(template, m, groups, namedGroups)
+    return expandReplacement(template, m, groups, namedGroups, expandOpts)
   })
 }
 
@@ -294,7 +502,7 @@ export function runRegexScript(script, rawString) {
  *
  * @param {unknown} raw
  * @param {number} placement
- * @param {{ isMarkdown?: boolean, isPrompt?: boolean, isEdit?: boolean, depth?: number, characterOverride?: string }} [params]
+ * @param {{ isMarkdown?: boolean, isPrompt?: boolean, isEdit?: boolean, depth?: number, characterOverride?: string, userName?: string, macros?: Record<string, string> }} [params]
  * @param {RegexScript[]} [scripts]
  * @returns {string}
  */
@@ -305,6 +513,11 @@ export function getRegexedString(raw, placement, params = {}, scripts = []) {
 
   let finalString = raw
   const list = Array.isArray(scripts) ? scripts : []
+  const runCtx = {
+    characterOverride: params.characterOverride,
+    userName: params.userName,
+    macros: params.macros,
+  }
 
   for (const script of list) {
     if (
@@ -316,7 +529,7 @@ export function getRegexedString(raw, placement, params = {}, scripts = []) {
         placement,
       })
     ) {
-      finalString = runRegexScript(script, finalString)
+      finalString = runRegexScript(script, finalString, runCtx)
     }
   }
 

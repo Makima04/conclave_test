@@ -31,6 +31,7 @@ function script(partial) {
     minDepth: partial.minDepth ?? null,
     maxDepth: partial.maxDepth ?? null,
     substituteRegex: partial.substituteRegex ?? 0,
+    trimStrings: partial.trimStrings ?? [],
   }
 }
 
@@ -127,7 +128,7 @@ describe('shouldRunScript / placement', () => {
     ).toBe(false)
   })
 
-  it('warns once for substituteRegex != 0', () => {
+  it('warns once for substituteRegex != 0 without macros when run', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const s = script({
       id: 'sub-1',
@@ -135,10 +136,61 @@ describe('shouldRunScript / placement', () => {
       replaceString: 'b',
       substituteRegex: 1,
     })
-    shouldRunScript(s, { placement: regex_placement.AI_OUTPUT })
-    shouldRunScript(s, { placement: regex_placement.AI_OUTPUT })
+    runRegexScript(s, 'a')
+    runRegexScript(s, 'a')
     expect(warn).toHaveBeenCalledTimes(1)
     warn.mockRestore()
+  })
+
+  it('accepts string placement numbers like card JSON may store', () => {
+    const s = script({
+      findRegex: 'a',
+      replaceString: 'b',
+      placement: ['2'],
+    })
+    expect(
+      shouldRunScript(s, {
+        isMarkdown: false,
+        placement: regex_placement.AI_OUTPUT,
+      }),
+    ).toBe(true)
+  })
+})
+
+describe('ST trimStrings / $0 / $<name>', () => {
+  it('applies trimStrings to capture groups (ST filterString)', () => {
+    const s = script({
+      findRegex: '/\\[(.+)\\]/g',
+      replaceString: '($1)',
+      trimStrings: ['x'],
+    })
+    expect(runRegexScript(s, '[axb]')).toBe('(ab)')
+  })
+
+  it('expands $0 and {{match}} to full match', () => {
+    expect(
+      runRegexScript(script({ findRegex: '/foo/g', replaceString: '[$0]' }), 'foo bar foo'),
+    ).toBe('[foo] bar [foo]')
+    expect(
+      runRegexScript(script({ findRegex: '/foo/g', replaceString: '[{{match}}]' }), 'foo'),
+    ).toBe('[foo]')
+  })
+
+  it('expands ST $<name> named groups', () => {
+    const s = script({
+      findRegex: '/(?<who>沈慕微)/g',
+      replaceString: 'name=$<who>',
+    })
+    expect(runRegexScript(s, '沈慕微来了')).toBe('name=沈慕微来了')
+  })
+
+  it('substituteRegex RAW with characterOverride in findRegex', () => {
+    const s = script({
+      findRegex: '/{{char}}/g',
+      replaceString: 'X',
+      substituteRegex: 1,
+    })
+    expect(runRegexScript(s, '苍玄 hi', { characterOverride: '苍玄' })).toBe('X hi')
   })
 })
 

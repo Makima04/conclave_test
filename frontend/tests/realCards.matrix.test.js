@@ -17,9 +17,11 @@ import {
   cardFirstMes,
   cardGreetings,
   cardRegexScripts,
+  cardDisplayRegexScripts,
   cardBookEntries,
   cardTavernHelperScripts,
   displayFingerprint,
+  summarizeCardRegex,
   FINGERPRINT_DIR,
   MIN_TRACKED_REAL_CARDS,
 } from '../../fixtures/helpers/realCards.mjs'
@@ -46,6 +48,35 @@ describe('real-card set integrity', () => {
     )
     // At least 2 distinct profiles among the set
     expect(new Set(profiles).size).toBeGreaterThanOrEqual(2)
+  })
+
+  it('each card ships distinct display regex_scripts (ST scoped, not host hardcode)', () => {
+    const summaries = cards.map((c) => summarizeCardRegex(c.card, { id: c.id, name: c.name }))
+    // Every card has at least one scoped script in this set (real ST cards)
+    for (const s of summaries) {
+      expect(s.total, `${s.id} should embed regex_scripts like ST`).toBeGreaterThan(0)
+      expect(Array.isArray(s.display_script_names)).toBe(true)
+    }
+    // Display signatures must not all collapse to one (anti single-card specialization)
+    const sigs = new Set(summaries.map((s) => s.display_signature))
+    expect(sigs.size).toBeGreaterThanOrEqual(2)
+    // Cross-check: at least two cards with different enabled display script name sets
+    const nameSets = summaries.map((s) => s.display_script_names.slice().sort().join('\0'))
+    expect(new Set(nameSets).size).toBeGreaterThanOrEqual(2)
+  })
+
+  it('display inventory: AI_OUTPUT display scripts are a subset of all scripts', () => {
+    for (const c of cards) {
+      const all = cardRegexScripts(c.card)
+      const display = cardDisplayRegexScripts(c.card)
+      expect(display.length).toBeLessThanOrEqual(all.length)
+      for (const s of display) {
+        expect(s.disabled).toBeFalsy()
+        expect(s.placement.map(Number)).toContain(2)
+        // prompt-only without markdown is never "display"
+        expect(!(s.promptOnly && !s.markdownOnly)).toBe(true)
+      }
+    }
   })
 })
 

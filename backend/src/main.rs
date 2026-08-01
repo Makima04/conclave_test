@@ -838,6 +838,7 @@ mod tests {
             markdown_only: true,
             prompt_only: false,
             disabled: false,
+            trim_strings: vec![],
         };
 
         let intro = render_card_message(&card, "说明页，请右滑开始。", &[statusbar_script.clone()]);
