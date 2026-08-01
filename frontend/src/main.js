@@ -1365,6 +1365,7 @@ function leaveOpeningForChat() {
 /**
  * Shell entry: read input, clear, delegate to kernel.sendUserMessage only.
  * No private fetch — all network lives in SessionKernel (PR-07).
+ * Input is restored on failure so the user does not lose draft text.
  */
 async function sendUserMessage() {
   const input = shell.getUserInput();
@@ -1372,11 +1373,15 @@ async function sendUserMessage() {
   if (!message || appState.sending || !kernel) return;
 
   shell.clearUserInput();
+  shell.clearChatStatus?.();
 
   try {
     await kernel.sendUserMessage(message);
+    shell.clearChatStatus?.();
   } catch (error) {
-    // Kernel onSendError already surfaces UI; ensure we don't leave unhandled rejection.
+    // Kernel onSendError already surfaces status outside the message root.
+    // Restore draft so a failed generate is not a silent data loss.
+    shell.setUserInput?.(message);
     console.warn('[ConclaveSTHost] sendUserMessage failed:', error);
   }
 }
@@ -1434,12 +1439,13 @@ kernel = createSessionKernel({
       shell.setSending(!!sending);
     },
     onSendError(error) {
-      const messageArea = shell.getMessageArea();
-      if (!messageArea) return;
-      const node = document.createElement('div');
-      node.className = 'st-error-message';
-      node.textContent = `发送失败: ${error instanceof Error ? error.message : String(error)}`;
-      messageArea.appendChild(node);
+      // Outside #st-message-area — never inject untracked DOM into MessageMount root.
+      const text = `发送失败: ${error instanceof Error ? error.message : String(error)}`;
+      if (typeof shell.setChatStatus === 'function') {
+        shell.setChatStatus(text);
+      } else {
+        shell.setDiagnostics?.(text);
+      }
     },
     renderAssistantDisplay(raw, backendHint = '') {
       return renderDisplayHtml(raw, backendHint);

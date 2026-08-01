@@ -78,6 +78,7 @@ export function createHostShell({
         </aside>
         <section class="st-render-pane">
           <main id="st-message-area" class="st-message-area" aria-live="polite"></main>
+          <div id="st-chat-status" class="st-chat-status" hidden role="status" aria-live="polite"></div>
           <form id="st-input-form" class="input-bar">
             <textarea id="st-user-input" placeholder="输入消息... (Enter 发送)" rows="1"></textarea>
             <button id="st-send-button" type="submit">发送</button>
@@ -243,6 +244,36 @@ export function createHostShell({
     if (input) input.value = '';
   }
 
+  /**
+   * Ephemeral send/status banner **outside** #st-message-area so MessageMount
+   * bubble counts stay equal to Session messages.length (PR-07 rule 4).
+   * @param {string | null | undefined} text
+   */
+  function setChatStatus(text) {
+    const el = document.getElementById('st-chat-status');
+    if (!el) return;
+    if (text == null || text === '') {
+      el.textContent = '';
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    el.textContent = String(text);
+  }
+
+  function clearChatStatus() {
+    setChatStatus('');
+  }
+
+  /**
+   * Restore draft into the user input (e.g. after a failed send).
+   * @param {string} text
+   */
+  function setUserInput(text) {
+    const input = getUserInput();
+    if (input) input.value = text == null ? '' : String(text);
+  }
+
   return {
     renderShell,
     showLoading,
@@ -255,6 +286,9 @@ export function createHostShell({
     renderOpeningSwipeControls,
     setSending,
     clearUserInput,
+    setUserInput,
+    setChatStatus,
+    clearChatStatus,
     getMessageArea,
     getUserInput,
     getSendButton,

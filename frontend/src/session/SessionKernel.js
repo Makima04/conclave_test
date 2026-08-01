@@ -398,6 +398,14 @@ export function createSessionKernel({
    *
    * Shell must NOT implement a parallel chat fetch.
    *
+   * Failure policy (after user append, before/during network or lifecycle):
+   *   - User row remains in Session transcript (no rollback; Session-first is durable).
+   *   - MVU is unchanged.
+   *   - No assistant row is appended.
+   *   - Error is surfaced via hooks.onSendError (must not inject untracked DOM into
+   *     the message-area transcript root — use shell status outside MessageMount).
+   *   - Callers that retry will append another user line (intentional, not atomic).
+   *
    * @param {string} text
    * @returns {Promise<object|null>} ChatResponse or null if skipped
    */
@@ -468,23 +476,36 @@ export function createSessionKernel({
       });
 
       const raw = data?.raw_text ?? data?.raw ?? '';
-      const newState =
-        data?.new_state && typeof data.new_state === 'object' ? data.new_state : {};
+      // Only apply new_state when it is a plain object; never wipe MVU with {}.
+      const hasNewState =
+        data?.new_state != null &&
+        typeof data.new_state === 'object' &&
+        !Array.isArray(data.new_state);
+      const priorMvu = ports.transcript.getMvu();
+      const appliedMvu = hasNewState ? data.new_state : priorMvu;
 
-      // 5a) append assistant raw_text
+      if (!hasNewState) {
+        ports.diagnostics?.log?.('warn', 'chat.missing_new_state', {
+          note: 'preserving prior session mvu',
+        });
+      }
+
+      // 5a) append assistant raw_text (data carries applied MVU, not empty wipe)
       const assistantEntry = ports.transcript.append({
         role: 'assistant',
         name: 'assistant',
         message: String(raw),
-        data: newState,
+        data: appliedMvu,
         swipes: [String(raw)],
         rendered_swipes: [''],
-        swipes_data: [newState],
+        swipes_data: [appliedMvu],
         swipes_info: [{}],
       });
 
-      // 5b) replaceMvu(new_state) — must apply, never discard
-      ports.transcript.replaceMvu(newState, 'chat.new_state');
+      // 5b) replaceMvu(new_state) only when server provided a valid object
+      if (hasNewState) {
+        ports.transcript.replaceMvu(data.new_state, 'chat.new_state');
+      }
 
       // 5c) display pipeline → cache rendered_swipes → MessageMount for any messageId
       const backendHint = data?.rendered_html || '';
@@ -508,11 +529,19 @@ export function createSessionKernel({
         renderedHtml: html,
         promptDebug: data?.prompt_debug || null,
         messageId: assistantEntry.message_id,
-        newState,
+        newState: hasNewState ? data.new_state : null,
       });
 
       return data;
     } catch (error) {
+      // Re-project from Session so any transient DOM drift is cleared (rule 4).
+      if (messageMount && typeof messageMount.renderAll === 'function') {
+        try {
+          messageMount.renderAll();
+        } catch {
+          /* ignore mount errors during failure */
+        }
+      }
       if (typeof onSendError === 'function') {
         onSendError(error);
       }

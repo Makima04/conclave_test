@@ -5,6 +5,11 @@
  * @module bridge/createPorts
  */
 
+import {
+  applyMvuToRuntimeState,
+  buildChatMessageEntry,
+} from '../shared/chatTranscript.js';
+
 /**
  * @returns {import('./ports.js').Lifecycle}
  */
@@ -124,6 +129,7 @@ export function createPorts(options) {
     return state.messages;
   }
 
+  /** Production write path for chat transcript (Kernel uses this). */
   const transcript = {
     getMessages() {
       return messages().slice();
@@ -137,24 +143,7 @@ export function createPorts(options) {
       if (!Array.isArray(list)) {
         throw new Error('ChatTranscript.append: runtime messages unavailable');
       }
-      const isUser = msg.role === 'user';
-      const text = msg.message ?? '';
-      const entry = {
-        message_id: list.length,
-        role: msg.role || 'assistant',
-        name: msg.name || (isUser ? 'User' : 'assistant'),
-        is_hidden: !!msg.is_hidden,
-        message: String(text),
-        data: msg.data && typeof msg.data === 'object' ? msg.data : {},
-        extra: msg.extra && typeof msg.extra === 'object' ? msg.extra : {},
-        swipe_id: Number.isFinite(Number(msg.swipe_id)) ? Number(msg.swipe_id) : 0,
-        swipes: Array.isArray(msg.swipes) ? msg.swipes : [String(text)],
-        rendered_swipes: Array.isArray(msg.rendered_swipes) ? msg.rendered_swipes : [''],
-        swipes_data: Array.isArray(msg.swipes_data)
-          ? msg.swipes_data
-          : [msg.data && typeof msg.data === 'object' ? msg.data : {}],
-        swipes_info: Array.isArray(msg.swipes_info) ? msg.swipes_info : [{}],
-      };
+      const entry = buildChatMessageEntry(list.length, msg);
       list.push(entry);
       return entry;
     },
@@ -192,20 +181,7 @@ export function createPorts(options) {
       if (!state) {
         throw new Error('ChatTranscript.replaceMvu: runtime unavailable');
       }
-      const next = mvu && typeof mvu === 'object' ? mvu : {};
-      state.mvuData = next;
-      // Design §3.3: new_state replaces latest assistant message data + session mvu.
-      const list = state.messages;
-      if (Array.isArray(list) && list.length) {
-        const last = list[list.length - 1];
-        if (last && last.role === 'assistant') {
-          last.data = next;
-          const swipeId = Number.isFinite(Number(last.swipe_id)) ? Number(last.swipe_id) : 0;
-          if (Array.isArray(last.swipes_data)) {
-            last.swipes_data[swipeId] = next;
-          }
-        }
-      }
+      applyMvuToRuntimeState(state, mvu);
       diagnostics.log('info', 'transcript.replaceMvu', { reason });
     },
   };

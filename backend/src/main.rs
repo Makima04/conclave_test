@@ -341,11 +341,7 @@ async fn chat_handler(
     };
 
     // PR-07: client_mvu is the FE Session base; fall back to server projection when absent.
-    if let Some(client) = req.client_mvu {
-        if client.is_object() {
-            *game_state = client;
-        }
-    }
+    apply_client_mvu_base(&mut game_state, req.client_mvu);
     // session_id accepted for future multi-session routing (unused in single-session MVP).
     let _session_id = req.session_id.as_deref();
     let _ = _session_id;
@@ -372,7 +368,10 @@ async fn chat_handler(
         format!("{base_prompt}\n\n{inj_text}")
     };
 
-    // 2. Mock LLM 响应（演示正则管线效果）
+    // 2. Mock LLM 响应（演示正则管线效果）.
+    // NOTE (PR-07): mock still echoes `user_message` only — `final_prompt` (with
+    // stubbed injections) is for prompt_debug / Mind proof until PR-11 wires it
+    // into real generation.
     let llm_raw_response = format!(
         r#"【沈慕微】："{}"
 <inner>（内心独白：对方说了 '{}' ...）</inner>"#,
@@ -647,14 +646,28 @@ fn initial_game_state(card: &card_loader::CardData) -> serde_json::Value {
     })
 }
 
+/// Apply FE client_mvu as the base for this turn when it is a JSON object.
+/// Non-object values are ignored (server projection kept).
+fn apply_client_mvu_base(game_state: &mut serde_json::Value, client_mvu: Option<serde_json::Value>) {
+    if let Some(client) = client_mvu {
+        if client.is_object() {
+            *game_state = client;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_init_response, initial_game_state, message_has_status_variable_payload,
-        render_card_message, CardStore,
+        apply_client_mvu_base, build_init_response, chat_handler, initial_game_state,
+        message_has_status_variable_payload, render_card_message, AppState, CardStore, ChatRequest,
     };
     use crate::card_loader::{CardData, CardInner, RegexScript};
+    use axum::extract::State;
+    use axum::Json;
     use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     #[test]
     fn status_placeholder_injection_requires_variable_payload() {
@@ -833,6 +846,65 @@ mod tests {
         // Failed select must not bump epoch.
         assert!(store.select_card(999).is_none());
         assert_eq!(store.session_epoch, 3);
+    }
+
+    #[test]
+    fn client_mvu_object_replaces_server_game_state_base() {
+        let mut state = json!({"stat_data": {"from": "server"}, "keep": false});
+        apply_client_mvu_base(
+            &mut state,
+            Some(json!({"stat_data": {"from": "client", "hp": 9}})),
+        );
+        assert_eq!(state["stat_data"]["from"], "client");
+        assert_eq!(state["stat_data"]["hp"], 9);
+        assert!(state.get("keep").is_none());
+    }
+
+    #[test]
+    fn client_mvu_non_object_is_ignored() {
+        let mut state = json!({"stat_data": {"from": "server"}});
+        apply_client_mvu_base(&mut state, Some(json!("not-an-object")));
+        assert_eq!(state["stat_data"]["from"], "server");
+        apply_client_mvu_base(&mut state, Some(json!([1, 2, 3])));
+        assert_eq!(state["stat_data"]["from"], "server");
+        apply_client_mvu_base(&mut state, None);
+        assert_eq!(state["stat_data"]["from"], "server");
+    }
+
+    #[tokio::test]
+    async fn chat_handler_new_state_descends_from_client_mvu_not_server() {
+        let card = minimal_neutral_card();
+        let app = AppState {
+            game_state: Arc::new(RwLock::new(json!({
+                "stat_data": { "from": "server_only" },
+                "initialized_lorebooks": {}
+            }))),
+            card_store: Arc::new(RwLock::new(CardStore::new(card, vec![]))),
+        };
+
+        let req = ChatRequest {
+            user_message: "ping".to_string(),
+            session_id: Some("1".to_string()),
+            client_mvu: Some(json!({
+                "stat_data": { "from": "client", "hp": 3 },
+                "initialized_lorebooks": {}
+            })),
+            injections: None,
+        };
+
+        let Json(resp) = chat_handler(State(app), Json(req)).await;
+        assert_eq!(resp.new_state["stat_data"]["from"], "client");
+        assert_eq!(resp.new_state["stat_data"]["hp"], 3);
+        assert!(
+            resp.new_state
+                .get("stat_data")
+                .and_then(|s| s.get("from"))
+                .map(|v| v != "server_only")
+                .unwrap_or(false)
+                || resp.new_state["stat_data"]["from"] == "client",
+            "new_state must not keep server_only base when client_mvu was provided"
+        );
+        assert!(resp.prompt_debug.is_some());
     }
 }
 

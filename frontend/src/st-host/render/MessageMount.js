@@ -66,10 +66,15 @@ export function createMessageMount(options = {}) {
    */
   function setMessageIdAttr(node, id) {
     if (!node) return
-    if (!node.dataset || typeof node.dataset !== 'object') {
-      node.dataset = {}
+    const value = String(id)
+    // Prefer setAttribute — real HTMLElement.dataset is a read-only DOMStringMap.
+    if (typeof node.setAttribute === 'function') {
+      node.setAttribute('data-message-id', value)
     }
-    node.dataset.messageId = String(id)
+    // Test stubs may only expose a plain dataset object.
+    if (node.dataset && typeof node.dataset === 'object') {
+      node.dataset.messageId = value
+    }
   }
 
   /**

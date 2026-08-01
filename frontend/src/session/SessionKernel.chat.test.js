@@ -243,6 +243,178 @@ describe('PR-07 SessionKernel.sendUserMessage chat sync', () => {
     expect(chatApi).not.toHaveBeenCalled()
     expect(store.getMessages().length).toBe(1)
   })
+
+  it('on chatApi rejection: keeps user, leaves mvu, no assistant, DOM matches Session', async () => {
+    const store = createSessionStore()
+    store.setRuntime(createMinimalRuntime())
+    store.setPhase('running')
+    const ports = createPorts({ getRuntime: () => store.getRuntime() })
+    const root = createDomRoot()
+    const messageMount = createMessageMount({
+      getRoot: () => root,
+      getMessages: () => store.getMessages(),
+      renderHtmlInto: (html, el) => {
+        el.innerHTML = html
+      },
+    })
+    messageMount.bind(root)
+    messageMount.refresh(0)
+
+    const priorMvu = { ...store.getMvu() }
+    const onSendError = vi.fn()
+    const chatApi = vi.fn(async () => {
+      throw new Error('network down')
+    })
+
+    const kernel = createSessionKernel({
+      store,
+      shell: {},
+      createRuntime: () => createMinimalRuntime(),
+      ports,
+      messageMount,
+      chatApi,
+      hooks: {
+        onSendError,
+        onLeaveOpeningForChat: () => {
+          messageMount.renderAll()
+        },
+      },
+    })
+
+    await expect(kernel.sendUserMessage('will fail')).rejects.toThrow(/network down/)
+
+    const messages = store.getMessages()
+    // opening + user only — no assistant
+    expect(messages).toHaveLength(2)
+    expect(messages[1].role).toBe('user')
+    expect(messages[1].message).toBe('will fail')
+    expect(store.getMvu()).toEqual(priorMvu)
+    expect(onSendError).toHaveBeenCalledTimes(1)
+    // After failure, renderAll re-projects Session → bubble count matches
+    expect(root.children.length).toBe(messages.length)
+    // No untracked error class nodes
+    expect(root.children.every((c) => !String(c.className || '').includes('st-error'))).toBe(true)
+  })
+
+  it('missing new_state preserves prior mvu and still appends assistant', async () => {
+    const store = createSessionStore()
+    store.setRuntime(createMinimalRuntime())
+    store.setPhase('running')
+    const ports = createPorts({ getRuntime: () => store.getRuntime() })
+    const prior = store.getMvu()
+
+    const chatApi = vi.fn(async () => ({
+      raw_text: 'reply without state',
+      // new_state intentionally omitted
+    }))
+
+    const kernel = createSessionKernel({
+      store,
+      shell: {},
+      createRuntime: () => createMinimalRuntime(),
+      ports,
+      chatApi,
+      hooks: {},
+    })
+
+    await kernel.sendUserMessage('hi')
+    expect(store.getMessages()).toHaveLength(3)
+    expect(store.getMessages().at(-1).role).toBe('assistant')
+    expect(store.getMessages().at(-1).message).toBe('reply without state')
+    expect(store.getMvu()).toEqual(prior)
+    expect(store.getMessages().at(-1).data).toEqual(prior)
+  })
+
+  it('array new_state is treated as invalid and does not wipe mvu', async () => {
+    const store = createSessionStore()
+    store.setRuntime(createMinimalRuntime())
+    const ports = createPorts({ getRuntime: () => store.getRuntime() })
+    const prior = store.getMvu()
+
+    const kernel = createSessionKernel({
+      store,
+      shell: {},
+      createRuntime: () => createMinimalRuntime(),
+      ports,
+      chatApi: async () => ({
+        raw_text: 'x',
+        new_state: [1, 2, 3],
+      }),
+      hooks: {},
+    })
+
+    await kernel.sendUserMessage('arr')
+    expect(store.getMvu()).toEqual(prior)
+  })
+
+  it('sending guard blocks concurrent double-send', async () => {
+    const store = createSessionStore()
+    store.setRuntime(createMinimalRuntime())
+    const ports = createPorts({ getRuntime: () => store.getRuntime() })
+
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const chatApi = vi.fn(async () => {
+      await gate
+      return { raw_text: 'done', new_state: { stat_data: { turn: 1 } } }
+    })
+
+    const kernel = createSessionKernel({
+      store,
+      shell: {},
+      createRuntime: () => createMinimalRuntime(),
+      ports,
+      chatApi,
+      hooks: {},
+    })
+
+    const first = kernel.sendUserMessage('one')
+    const second = await kernel.sendUserMessage('two')
+    expect(second).toBeNull()
+    release()
+    await first
+    expect(chatApi).toHaveBeenCalledTimes(1)
+    // only one user turn
+    expect(store.getMessages().filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
+  it('without onLeaveOpeningForChat, refresh-only path still mounts user+assistant', async () => {
+    const store = createSessionStore()
+    store.setRuntime(createMinimalRuntime())
+    const ports = createPorts({ getRuntime: () => store.getRuntime() })
+    const root = createDomRoot()
+    const messageMount = createMessageMount({
+      getRoot: () => root,
+      getMessages: () => store.getMessages(),
+      renderHtmlInto: (html, el) => {
+        el.innerHTML = html
+      },
+    })
+    messageMount.bind(root)
+    messageMount.refresh(0)
+
+    const kernel = createSessionKernel({
+      store,
+      shell: {},
+      createRuntime: () => createMinimalRuntime(),
+      ports,
+      messageMount,
+      chatApi: async () => ({
+        raw_text: 'ok',
+        new_state: { stat_data: { t: 1 } },
+      }),
+      hooks: {
+        // deliberately no onLeaveOpeningForChat
+      },
+    })
+
+    await kernel.sendUserMessage('ping')
+    expect(store.getMessages()).toHaveLength(3)
+    expect(messageMount.getNode(1)?.className).toBe('st-user-message')
+    expect(messageMount.getNode(2)?.className).toBe('st-assistant-message')
+  })
 })
 
 describe('SessionStore message/mvu helpers (PR-07)', () => {
