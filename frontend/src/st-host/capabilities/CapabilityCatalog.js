@@ -416,7 +416,13 @@ export function createCapabilityCatalog({ adapter, surfaces = {} } = {}) {
   const byId = new Map(descriptors.map((d) => [d.id, d]));
 
   /**
-   * Track extension-registered ids so list() stays consistent.
+   * Built-in seed ids — never overwritten by extension register, never deleted by unregister.
+   * @type {ReadonlySet<string>}
+   */
+  const seedIds = new Set(descriptors.map((d) => d.id));
+
+  /**
+   * Track extension-registered ids (non-seed only).
    * @type {Set<string>}
    */
   const extensionIds = new Set();
@@ -424,6 +430,13 @@ export function createCapabilityCatalog({ adapter, surfaces = {} } = {}) {
   return {
     alwaysInstallIds() {
       return [...ALWAYS_INSTALL_IDS];
+    },
+    /**
+     * @param {string} id
+     * @returns {boolean}
+     */
+    isSeed(id) {
+      return seedIds.has(String(id || ''));
     },
     /**
      * @param {string} id
@@ -440,28 +453,35 @@ export function createCapabilityCatalog({ adapter, surfaces = {} } = {}) {
     },
     /**
      * P2: ExtensionManager may register capability descriptors at activate time.
-     * Overwrites any existing descriptor with the same id.
+     * Refuses to clobber built-in seed ids (kernel/catalog seeds).
      * @param {CapabilityDescriptor} desc
      */
     register(desc) {
       if (!desc || typeof desc !== 'object' || !desc.id) {
         throw new Error('CapabilityCatalog.register: descriptor with id is required');
       }
-      if (typeof desc.install !== 'function') {
-        throw new Error(`CapabilityCatalog.register: ${desc.id} needs install()`);
+      const id = String(desc.id);
+      if (seedIds.has(id)) {
+        throw new Error(
+          `CapabilityCatalog.register: cannot overwrite built-in capability "${id}"`
+        );
       }
-      byId.set(desc.id, desc);
-      extensionIds.add(desc.id);
-      return desc;
+      if (typeof desc.install !== 'function') {
+        throw new Error(`CapabilityCatalog.register: ${id} needs install()`);
+      }
+      byId.set(id, { ...desc, id });
+      extensionIds.add(id);
+      return byId.get(id);
     },
     /**
      * Remove a dynamically registered capability (extension deactivate).
-     * Built-in seed descriptors are not removed.
+     * Built-in seed descriptors are never removed, even if mistakenly listed.
      * @param {string} id
      * @returns {boolean}
      */
     unregister(id) {
       const key = String(id || '');
+      if (seedIds.has(key)) return false;
       if (!extensionIds.has(key)) return false;
       byId.delete(key);
       extensionIds.delete(key);

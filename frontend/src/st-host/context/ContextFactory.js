@@ -182,8 +182,8 @@ export function createContextFactory({
 
   const slashParser = createSlashCommandParser();
 
-  /** @type {boolean} */
-  let isGenerating = false;
+  /** In-flight generate() refcount (Issue 6: concurrent generate safety). */
+  let generatingCount = 0;
 
   /**
    * Allow host to (re)bind generate path after factory creation.
@@ -321,11 +321,11 @@ export function createContextFactory({
    */
   async function generate(...args) {
     if (typeof generateFn === 'function') {
-      isGenerating = true;
+      generatingCount += 1;
       try {
         return await Promise.resolve(generateFn(...args));
       } finally {
-        isGenerating = false;
+        generatingCount = Math.max(0, generatingCount - 1);
       }
     }
     console.warn(
@@ -343,7 +343,8 @@ export function createContextFactory({
    * @param {...any} args
    */
   function stopGeneration(...args) {
-    isGenerating = false;
+    // Force-clear in-flight flag; host stopGenerationFn should abort underlying work.
+    generatingCount = 0;
     if (typeof stopGenerationFn === 'function') {
       stopGenerationFn(...args);
       return;
@@ -404,12 +405,21 @@ export function createContextFactory({
       }
     }
 
+    // Unknown slash token: surface as error so typos are not silent success.
+    // (ST full parser may differ; Conclave P2 subset prefers explicit failure.)
     console.warn(
       '[ConclaveSTHost] getContext().executeSlashCommandsWithOptions: unknown command',
       text,
       options
     );
-    return { pipe: '', isError: false, isAborted: false, isSuccess: true, interrupt: false };
+    return {
+      pipe: '',
+      isError: true,
+      isAborted: false,
+      isSuccess: false,
+      interrupt: false,
+      error: `unknown slash command: ${raw}`,
+    };
   }
 
   /**
@@ -472,8 +482,8 @@ export function createContextFactory({
       SlashCommandParser: slashParser,
       updateChatMetadata,
       getCurrentChatId,
-      /** P2: generation-path state flag for UI / extensions */
-      isGenerating: () => isGenerating,
+      /** P2: true while any generate() call is in flight (refcount). */
+      isGenerating: () => generatingCount > 0,
       variables: {
         get local() {
           return variables.chat || {};

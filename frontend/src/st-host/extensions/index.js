@@ -6,4 +6,5 @@
 export {
   createExtensionManager,
   normalizeManifest,
+  isRemoteExtensionEntryAllowed,
 } from './ExtensionManager.js';

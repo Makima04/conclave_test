@@ -20,8 +20,14 @@
  * }
  * ```
  *
+ * Remote entry URLs are **default-deny** (same pattern as ScriptRunner PR-08).
+ * Override via `allowRemoteEntry` option or
+ * `localStorage['conclave:feature:allow_remote_extension_entry'] === '1'`.
+ *
  * @module st-host/extensions/ExtensionManager
  */
+
+import { isRemoteScriptUrl } from '../ScriptRunner.js';
 
 /**
  * @typedef {Object} ExtensionManifest
@@ -54,15 +60,35 @@
 
 /**
  * @typedef {Object} ExtensionManagerOptions
- * @property {{ get?: Function, register?: Function, unregister?: Function }} [catalog]
+ * @property {{ get?: Function, register?: Function, unregister?: Function, isSeed?: Function }} [catalog]
  *   CapabilityCatalog — extensions may register capability descriptors on activate.
- * @property {{ install?: Function, getReport?: Function, noteExtensionCaps?: Function }} [registry]
+ * @property {{ install?: Function, getReport?: Function, noteExtensionCaps?: Function, clearExtensionCaps?: Function }} [registry]
  *   Optional CapabilityRegistry; when present, declared caps are noted on the report.
  * @property {(entry: string, record: ExtensionRecord) => Promise<object|Function|null|undefined>} [loadEntry]
- *   Module loader (injectable for tests). Default: dynamic import(entry).
+ *   Module loader (injectable for tests). Default: dynamic import(entry) after remote check.
+ * @property {boolean|(() => boolean)} [allowRemoteEntry]
+ *   Allow http(s)/protocol-relative entry (default false; flag override below).
  * @property {(record: ExtensionRecord, module: object) => object} [createActivateContext]
  *   Extra context passed to extension activate hooks.
  */
+
+/**
+ * Feature flag: allow remote extension entry URLs (default false).
+ * `localStorage['conclave:feature:allow_remote_extension_entry'] === '1'`.
+ *
+ * @param {Storage|null|undefined} [storage]
+ * @returns {boolean}
+ */
+export function isRemoteExtensionEntryAllowed(storage) {
+  try {
+    const store =
+      storage ||
+      (typeof globalThis !== 'undefined' ? globalThis.localStorage : null);
+    return store?.getItem?.('conclave:feature:allow_remote_extension_entry') === '1';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Normalize raw manifest into a stable record.
@@ -115,7 +141,7 @@ export function normalizeManifest(raw, fallbackName = 'unnamed') {
 }
 
 /**
- * Default entry loader — dynamic import. Failures surface as activate errors.
+ * Default entry loader — dynamic import after remote-deny gate (callers should also gate).
  * @param {string} entry
  * @returns {Promise<object>}
  */
@@ -160,6 +186,30 @@ function resolveHook(mod, hookName, kind) {
 }
 
 /**
+ * Build a safe capability descriptor; fill missing install() so mid-activate does not throw.
+ * @param {string} id
+ * @param {string} extensionName
+ * @param {object} [partial]
+ */
+function ensureDescriptor(id, extensionName, partial = {}) {
+  if (partial && typeof partial.install === 'function') {
+    return { ...partial, id, kind: partial.kind || 'extension', requiredByDefault: false };
+  }
+  return {
+    id,
+    kind: 'extension',
+    requiredByDefault: false,
+    install() {
+      return {
+        status: 'ready',
+        detail: `extension:${extensionName} provides ${id}`,
+        providedGlobals: [],
+      };
+    },
+  };
+}
+
+/**
  * @param {ExtensionManagerOptions} [options]
  */
 export function createExtensionManager(options = {}) {
@@ -167,6 +217,7 @@ export function createExtensionManager(options = {}) {
     catalog = null,
     registry = null,
     loadEntry = defaultLoadEntry,
+    allowRemoteEntry = false,
     createActivateContext = null,
   } = options;
 
@@ -175,6 +226,24 @@ export function createExtensionManager(options = {}) {
 
   /** Global requiresReload marker (ST-style). */
   let requiresReload = false;
+
+  function resolveAllowRemote() {
+    if (typeof allowRemoteEntry === 'function') return !!allowRemoteEntry();
+    if (allowRemoteEntry === true) return true;
+    return isRemoteExtensionEntryAllowed();
+  }
+
+  /**
+   * Assert entry is allowed before dynamic import / custom loadEntry.
+   * @param {string} entry
+   */
+  function assertEntryAllowed(entry) {
+    if (isRemoteScriptUrl(entry) && !resolveAllowRemote()) {
+      throw new Error(
+        `ExtensionManager: remote entry denied by default (set conclave:feature:allow_remote_extension_entry=1 or allowRemoteEntry): ${entry}`
+      );
+    }
+  }
 
   /**
    * Register a local extension from an in-memory manifest (+ optional preloaded module).
@@ -236,15 +305,34 @@ export function createExtensionManager(options = {}) {
   }
 
   /**
+   * @param {ExtensionRecord} record
+   */
+  async function runTeardowns(record) {
+    for (let i = record.teardowns.length - 1; i >= 0; i -= 1) {
+      try {
+        await Promise.resolve(record.teardowns[i]());
+      } catch (error) {
+        console.warn(`[ExtensionManager] teardown for "${record.name}" failed:`, error);
+      }
+    }
+    record.teardowns.length = 0;
+  }
+
+  /**
    * Register capability descriptors declared by the extension module onto the catalog.
    * Module may export `capabilities: CapabilityDescriptor[]` or `getCapabilities()`.
+   * Missing install() is auto-synthesized (never throws mid-activate for that reason).
+   * Built-in seed ids are skipped with a warning (catalog also refuses clobber).
    *
    * @param {ExtensionRecord} record
    * @param {object} mod
+   * @returns {string[]} capability ids actually registered
    */
   function installDeclaredCapabilities(record, mod) {
     const ids = record.capabilityIds;
-    if (!ids.length) return;
+    /** @type {string[]} */
+    const registered = [];
+    if (!ids.length) return registered;
 
     /** @type {object[]} */
     let descriptors = [];
@@ -256,52 +344,71 @@ export function createExtensionManager(options = {}) {
     }
 
     for (const id of ids) {
-      const desc =
-        descriptors.find((d) => d && d.id === id) ||
-        ({
-          id,
-          kind: 'extension',
-          requiredByDefault: false,
-          install() {
-            return {
-              status: 'ready',
-              detail: `extension:${record.name} provides ${id}`,
-              providedGlobals: [],
-            };
-          },
-        });
-
-      if (catalog && typeof catalog.register === 'function') {
-        catalog.register(desc);
+      if (catalog && typeof catalog.isSeed === 'function' && catalog.isSeed(id)) {
+        console.warn(
+          `[ExtensionManager] extension "${record.name}" cannot claim built-in capability "${id}" — skipped`
+        );
+        continue;
       }
 
-      // Soft note on registry report without full reinstall.
+      const partial = descriptors.find((d) => d && d.id === id) || {};
+      const desc = ensureDescriptor(id, record.name, partial);
+
+      if (catalog && typeof catalog.register === 'function') {
+        try {
+          catalog.register(desc);
+          registered.push(id);
+        } catch (error) {
+          console.warn(
+            `[ExtensionManager] catalog.register(${id}) failed:`,
+            error instanceof Error ? error.message : error
+          );
+          continue;
+        }
+      } else {
+        registered.push(id);
+      }
+
       if (registry && typeof registry.noteExtensionCaps === 'function') {
         registry.noteExtensionCaps(record.name, id, 'ready');
       }
     }
+
+    // Remember what we actually registered so deactivate can reverse accurately.
+    record._registeredCapabilityIds = registered;
+    return registered;
   }
 
   /**
-   * Unregister extension capability ids from catalog on deactivate.
+   * Unregister extension capability ids from catalog + clear registry notes.
    * @param {ExtensionRecord} record
    */
   function uninstallDeclaredCapabilities(record) {
-    if (!catalog || typeof catalog.unregister !== 'function') return;
-    for (const id of record.capabilityIds) {
-      try {
-        catalog.unregister(id);
-      } catch (error) {
-        console.warn(
-          `[ExtensionManager] catalog.unregister(${id}) failed:`,
-          error
-        );
+    const ids = Array.isArray(record._registeredCapabilityIds)
+      ? record._registeredCapabilityIds
+      : record.capabilityIds;
+
+    for (const id of ids) {
+      if (catalog && typeof catalog.unregister === 'function') {
+        try {
+          catalog.unregister(id);
+        } catch (error) {
+          console.warn(
+            `[ExtensionManager] catalog.unregister(${id}) failed:`,
+            error
+          );
+        }
+      }
+      if (registry && typeof registry.clearExtensionCaps === 'function') {
+        registry.clearExtensionCaps(record.name, id);
       }
     }
+    record._registeredCapabilityIds = [];
   }
 
   /**
    * Activate an extension by name (load entry if needed, run activate hook).
+   * On failure after the hook starts, teardowns + partial caps are cleaned up.
    * @param {string} name
    * @returns {Promise<ExtensionRecord>}
    */
@@ -322,6 +429,7 @@ export function createExtensionManager(options = {}) {
           `ExtensionManager.activate: extension "${key}" has no entry and no preloaded module`
         );
       }
+      assertEntryAllowed(record.entry);
       mod = await loadEntry(record.entry, record);
       record.module = mod;
     }
@@ -345,20 +453,32 @@ export function createExtensionManager(options = {}) {
         ? { ...baseCtx, ...createActivateContext(record, mod) }
         : baseCtx;
 
-    if (activateFn) {
-      await Promise.resolve(activateFn(ctx));
+    try {
+      if (activateFn) {
+        await Promise.resolve(activateFn(ctx));
+      }
+
+      installDeclaredCapabilities(record, mod && typeof mod === 'object' ? mod : {});
+
+      record.active = true;
+      record.context = ctx;
+      return record;
+    } catch (error) {
+      // Partial activate: always run hook teardowns + reverse any caps that got in.
+      try {
+        await runTeardowns(record);
+      } catch {
+        /* runTeardowns already swallows per-fn */
+      }
+      try {
+        uninstallDeclaredCapabilities(record);
+      } catch {
+        /* ignore */
+      }
+      record.active = false;
+      record.context = null;
+      throw error;
     }
-
-    installDeclaredCapabilities(record, mod && typeof mod === 'object' ? mod : {});
-
-    record.active = true;
-    record.context = ctx;
-
-    if (record.requiresReloadOnChange) {
-      // Activating a reload-marked ext does not force reload; deactivating does.
-    }
-
-    return record;
   }
 
   /**
@@ -373,6 +493,11 @@ export function createExtensionManager(options = {}) {
       throw new Error(`ExtensionManager.deactivate: unknown extension "${key}"`);
     }
     if (!record.active) {
+      // Still drain stranded teardowns from a failed activate that left debris
+      // (should be rare after activate-catch cleanup).
+      if (record.teardowns.length) {
+        await runTeardowns(record);
+      }
       return record;
     }
 
@@ -388,15 +513,7 @@ export function createExtensionManager(options = {}) {
       }
     }
 
-    for (let i = record.teardowns.length - 1; i >= 0; i -= 1) {
-      try {
-        await Promise.resolve(record.teardowns[i]());
-      } catch (error) {
-        console.warn(`[ExtensionManager] teardown for "${key}" failed:`, error);
-      }
-    }
-    record.teardowns.length = 0;
-
+    await runTeardowns(record);
     uninstallDeclaredCapabilities(record);
 
     record.active = false;
@@ -449,5 +566,7 @@ export function createExtensionManager(options = {}) {
     markRequiresReload,
     clearRequiresReload,
     normalizeManifest,
+    /** @internal test helper */
+    _resolveAllowRemote: resolveAllowRemote,
   };
 }

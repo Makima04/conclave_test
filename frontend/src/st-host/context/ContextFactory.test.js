@@ -36,13 +36,24 @@ describe('CONTEXT_FIELD_MATRIX (P2 progress)', () => {
 describe('createContextFactory P2 fields', () => {
   it('getContext().chat is live and never equals a TavernHelper stand-in', () => {
     const state = createMessagesState([{ message_id: 0, message: 'hi', mes: 'hi' }]);
-    const tavernHelper = { getChatMessages: () => [] };
+    const tavernHelper = {
+      getChatMessages: () => [],
+      setChatMessages: () => {},
+      getVariables: () => ({}),
+      eventOn: () => {},
+      eventEmit: () => {},
+    };
     const factory = createContextFactory({
       getRuntimeState: () => state,
       getCardName: () => 'Card',
     });
     const ctx = factory.getContext();
+    // KD2: identity and shape — context is not TH and has no TH surface methods.
     expect(ctx).not.toBe(tavernHelper);
+    expect(typeof ctx.getChatMessages).toBe('undefined');
+    expect(typeof ctx.setChatMessages).toBe('undefined');
+    expect(ctx.chat).toBeDefined();
+    expect(ctx.eventSource).toBeDefined();
     expect(ctx.chat).toBe(state.messages);
     expect(ctx.chat).toHaveLength(1);
     state.messages.push({ message_id: 1, message: 'next' });
@@ -206,5 +217,43 @@ describe('createContextFactory P2 fields', () => {
     ctx.setExtensionPrompt('mind.primary', 'remember X', 0, 1, true, 'system');
     expect(ctx.extensionPrompts['mind.primary'].value).toBe('remember X');
     expect(ctx.extensionPrompts['mind.primary'].depth).toBe(1);
+  });
+
+  it('isGenerating uses refcount across concurrent generate calls', async () => {
+    /** @type {Array<() => void>} */
+    const resolvers = [];
+    const generateFn = vi.fn(
+      () =>
+        new Promise((r) => {
+          resolvers.push(r);
+        })
+    );
+    const factory = createContextFactory({
+      getRuntimeState: () => createMessagesState(),
+      generateFn,
+    });
+    const ctx = factory.getContext();
+    const p1 = ctx.generate('a');
+    const p2 = ctx.generate('b');
+    expect(ctx.isGenerating()).toBe(true);
+    resolvers[0]('1');
+    await p1;
+    // Second still in flight
+    expect(ctx.isGenerating()).toBe(true);
+    resolvers[1]('2');
+    await p2;
+    expect(ctx.isGenerating()).toBe(false);
+  });
+
+  it('unknown slash command returns isError (not silent success)', async () => {
+    const factory = createContextFactory({
+      getRuntimeState: () => createMessagesState(),
+    });
+    const result = await factory
+      .getContext()
+      .executeSlashCommandsWithOptions('/no-such-command xyz');
+    expect(result.isError).toBe(true);
+    expect(result.isSuccess).toBe(false);
+    expect(result.error).toMatch(/unknown slash command/);
   });
 });

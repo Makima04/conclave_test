@@ -66,6 +66,7 @@ export function createCapabilityRegistry({ catalog, adapter, strict = true } = {
   /**
    * P2: soft-note capability ids provided by ExtensionManager without a full reinstall.
    * Updates lastReport.byId / installed so diagnostics can surface extension caps.
+   * Pair with {@link clearExtensionCaps} on deactivate.
    *
    * @param {string} extensionName
    * @param {string} capabilityId
@@ -84,6 +85,34 @@ export function createCapabilityRegistry({ catalog, adapter, strict = true } = {
       installed: lastReport.installed.includes(id)
         ? lastReport.installed
         : [...lastReport.installed, id],
+    };
+  }
+
+  /**
+   * Reverse {@link noteExtensionCaps} when an extension deactivates.
+   * Removes id from installed and marks byId disabled (or drops when status was extension-only).
+   *
+   * @param {string} extensionName
+   * @param {string} capabilityId
+   */
+  function clearExtensionCaps(extensionName, capabilityId) {
+    const id = String(capabilityId || '');
+    if (!id) return;
+    const prev = lastReport.byId[id];
+    const nextById = { ...lastReport.byId };
+    if (prev && String(prev.detail || '').startsWith('extension:')) {
+      delete nextById[id];
+    } else if (prev) {
+      nextById[id] = {
+        ...prev,
+        status: 'disabled',
+        detail: `extension:${extensionName || 'unknown'} deactivated`,
+      };
+    }
+    lastReport = {
+      ...lastReport,
+      byId: nextById,
+      installed: lastReport.installed.filter((x) => x !== id),
     };
   }
 
@@ -241,5 +270,6 @@ export function createCapabilityRegistry({ catalog, adapter, strict = true } = {
     getReport,
     teardown,
     noteExtensionCaps,
+    clearExtensionCaps,
   };
 }
