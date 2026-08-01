@@ -63,8 +63,8 @@
 
 /**
  * Full session snapshot — SessionStore holds the live copy.
- * PR-02 migrates card/bootstrap fields + runtime ref; messages/mvu authority
- * still lives on runtime.runtimeState until PR-07.
+ * PR-07: chat transcript + MVU authority is SessionStore view over
+ * runtime.runtimeState.messages / mvuData (ports.transcript is the write path).
  *
  * @typedef {Object} SessionSnapshot
  * @property {SessionPhase} phase
@@ -81,6 +81,7 @@
  * @property {object|null} requirements  // runtime_requirements from backend
  * @property {SessionRuntime|null} runtime
  * @property {object|null} capabilities  // CapabilityInstallReport; null until install
+ * @property {object|null} mind  // MindSnapshot when flag on; null when Mind off (PR-11)
  */
 
 /**

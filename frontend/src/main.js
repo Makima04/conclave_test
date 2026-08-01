@@ -40,6 +40,8 @@ import {
 } from './st-host/ScriptRunner.js';
 import { createPorts } from './bridge/createPorts.js';
 import { MVU_EVENTS } from './bridge/stEventMap.js';
+import { createMindService, isMindEnabled } from './mind/MindService.js';
+import { createMindDebugPanel } from './mind/MindDebugPanel.js';
 
 const OPENING_SWIPE_REFRESH_DELAY_MS = 650;
 
@@ -50,6 +52,34 @@ const store = createSessionStore();
 const ports = createPorts({
   getRuntime: () => store.getRuntime(),
 });
+
+/**
+ * Mind MVP (PR-11): only when flag on. Flag off → mind null, no injection key, no panel.
+ * Mind uses ports only — never imports st-host concrete APIs.
+ */
+const mindEnabled = isMindEnabled();
+/** @type {ReturnType<typeof createMindDebugPanel> | null} */
+let mindDebugPanel = null;
+/** @type {ReturnType<typeof createMindService> | null} */
+const mind = mindEnabled
+  ? createMindService({
+      transcript: ports.transcript,
+      promptInjection: ports.promptInjection,
+      lifecycle: ports.lifecycle,
+      diagnostics: ports.diagnostics,
+      onSnapshot(snap) {
+        store.setMind(snap);
+        mindDebugPanel?.refresh();
+      },
+    })
+  : null;
+// Snapshot stays null until Mind emits (and always null when flag off).
+store.setMind(null);
+if (mindEnabled && mind) {
+  mindDebugPanel = createMindDebugPanel({
+    getSnapshot: () => mind.getSnapshot() ?? store.getMind(),
+  });
+}
 
 /**
  * UI / host-chrome state only (not session authority).
@@ -78,10 +108,23 @@ const shell = createHostShell({
     void selectImportedWorldbook(id);
   },
   onSend: () => {
+    // Shell only delegates — no private chat fetch (PR-07 §3.3 rule 2).
     void sendUserMessage();
   },
   onSwipe: delta => {
     void changeOpeningSwipe(delta);
+  },
+});
+
+/**
+ * PR-07 MessageMount: sole DOM projector for chat bubbles (any messageId).
+ * PR-08/09: teardown on card switch; when card_iframe on, renderCardHtml may target CardFrame.
+ */
+const messageMount = createMessageMount({
+  getRoot: () => shell.getMessageArea() || document.getElementById('st-message-area'),
+  getMessages: () => store.getMessages(),
+  renderHtmlInto: (html, targetEl) => {
+    renderCardHtml(html || '', targetEl);
   },
 });
 
@@ -107,18 +150,6 @@ const scriptRunner = createScriptRunner({
 let cardFrame = null;
 /** @type {ReturnType<typeof createBridgeHost>|null} */
 let bridgeHost = null;
-
-/**
- * PR-08: MessageMount owns opening/message DOM for card-switch teardown.
- * renderHtmlInto reuses renderCardHtml (head nodes + inline scripts).
- * When card_iframe is on, HTML/scripts mount into CardFrame inside the section.
- */
-const messageMount = createMessageMount({
-  getRoot: () => shell.getMessageArea(),
-  renderHtmlInto: (html, target) => {
-    renderCardHtml(html, target);
-  },
-});
 
 let domContentLoadedFired = document.readyState === 'complete';
 
@@ -198,7 +229,11 @@ function renderShell() {
   shell.renderShell({
     cardName: store.getCardName() || 'Conclave',
     worldbooks: store.getImportedWorldbooks(),
+    mindEnabled: !!mind,
   });
+  if (mind && mindDebugPanel) {
+    mindDebugPanel.refresh();
+  }
 }
 
 function showLoading() {
@@ -336,20 +371,29 @@ function showOpeningView() {
 
   appState.activeView = 'opening';
   appState.openingMessageNode = null;
-  // Clear prior mount nodes on view re-entry / card switch (PR-08).
+
+  // Project only opening (messageId 0) via MessageMount — same renderer as chat turns.
   messageMount.teardown();
+  messageMount.bind(messageArea);
 
   const runtime = ensureRuntime();
   const message = runtime.runtimeState.messages[0];
-  const swipeId = Number.isFinite(Number(message?.swipe_id)) ? Number(message.swipe_id) : 0;
-  const rendered = Array.isArray(message?.rendered_swipes) ? message.rendered_swipes[swipeId] : '';
-  const html =
-    rendered || message?.message || store.getOpeningRenderedMessages()[0] || '';
-  messageMount.mountOpening(html, {
-    onMounted: node => {
-      appState.openingMessageNode = node;
-    },
-  });
+  if (message) {
+    const swipeId = Number.isFinite(Number(message.swipe_id)) ? Number(message.swipe_id) : 0;
+    const raw =
+      (Array.isArray(message.swipes) ? message.swipes[swipeId] : '') || message.message || '';
+    const backendHint = Array.isArray(message.rendered_swipes)
+      ? message.rendered_swipes[swipeId] || ''
+      : store.getOpeningRenderedMessages()[0] || '';
+    const html = renderDisplayHtml(raw, backendHint);
+    if (Array.isArray(message.rendered_swipes)) {
+      message.rendered_swipes[swipeId] = html;
+    }
+  }
+
+  messageMount.refresh(0);
+  appState.openingMessageNode = messageMount.getNode(0);
+
   renderOpeningSwipeControls();
   updateShellViewState();
 }
@@ -1412,11 +1456,16 @@ function scheduleDisplayedMessageRefresh(messageId, delayMs = 0) {
   refreshDisplayedMessage(messageId);
 }
 
+/**
+ * PR-07: refresh any messageId via MessageMount (not only opening id 0).
+ * @param {number} messageId
+ */
 function refreshDisplayedMessage(messageId) {
   const runtime = store.getRuntime();
-  if (messageId !== 0 || !appState.openingMessageNode || !runtime) return;
+  if (!runtime) return;
 
-  const message = runtime.runtimeState.messages[0];
+  const id = Number(messageId);
+  const message = runtime.runtimeState.messages[id];
   if (!message) return;
 
   const swipeId = Number.isFinite(Number(message.swipe_id)) ? Number(message.swipe_id) : 0;
@@ -1428,88 +1477,56 @@ function refreshDisplayedMessage(messageId) {
     ? message.rendered_swipes[swipeId] || ''
     : '';
   const html = renderDisplayHtml(raw, backendHint);
-  // Keep rendered_swipes cache in sync when FE pipeline is authoritative.
-  if (isDisplayRegexFeEnabled() && Array.isArray(message.rendered_swipes)) {
+  // Keep rendered_swipes cache in sync for MessageMount + FE pipeline.
+  if (Array.isArray(message.rendered_swipes)) {
     message.rendered_swipes[swipeId] = html;
   }
-  renderCardHtml(html || '', appState.openingMessageNode);
-  renderOpeningSwipeControls();
+
+  const messageArea = shell.getMessageArea();
+  if (messageArea) messageMount.bind(messageArea);
+  messageMount.refresh(id);
+
+  if (id === 0) {
+    appState.openingMessageNode = messageMount.getNode(0);
+    renderOpeningSwipeControls();
+  }
 }
 
-function appendUserMessage(messageArea, message) {
-  const node = document.createElement('div');
-  node.className = 'st-user-message';
-  node.textContent = message;
-  messageArea.appendChild(node);
+/**
+ * When leaving opening-only view for a chat turn, re-project full Session transcript
+ * so DOM bubble count matches messages.length (PR-07 rule 4).
+ */
+function leaveOpeningForChat() {
+  if (appState.activeView === 'opening') {
+    appState.activeView = 'chat';
+    const messageArea = shell.getMessageArea();
+    if (messageArea) messageMount.bind(messageArea);
+    messageMount.renderAll();
+    shell.clearOpeningSwipeControls();
+  }
 }
 
-function appendAssistantMessage(messageArea, htmlContent, options = {}) {
-  const node = document.createElement('section');
-  node.className = 'st-assistant-message';
-  messageArea.appendChild(node);
-  if (options.opening) appState.openingMessageNode = node;
-  renderCardHtml(htmlContent, node);
-  return node;
-}
-
+/**
+ * Shell entry: read input, clear, delegate to kernel.sendUserMessage only.
+ * No private fetch — all network lives in SessionKernel (PR-07).
+ * Input is restored on failure so the user does not lose draft text.
+ */
 async function sendUserMessage() {
   const input = shell.getUserInput();
-  const messageArea = shell.getMessageArea();
   const message = input?.value.trim();
-  if (!message || appState.sending || !messageArea) return;
+  if (!message || appState.sending || !kernel) return;
 
-  appState.sending = true;
   shell.clearUserInput();
-  shell.setSending(true);
-  appendUserMessage(messageArea, message);
+  shell.clearChatStatus?.();
 
   try {
-    // PR-05: lifecycle hooks for Mind / diagnostics (before LLM path)
-    const injections = ports.promptInjection.list();
-    await ports.lifecycle.emit('beforeGenerate', {
-      userMessage: message,
-      injections,
-    });
-
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_message: message,
-        // Future: forward ports.promptInjection.list() as injections[]
-        injections: ports.promptInjection.list().map(({ key, ...rest }) => ({
-          key,
-          ...rest,
-        })),
-      }),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    // PR-06: assistant display prefers FE processDisplay on raw_text when enabled.
-    const raw = data.raw_text || '';
-    const html = isDisplayRegexFeEnabled()
-      ? processDisplay(raw, store.getRegexScripts(), {
-          placement: regex_placement.AI_OUTPUT,
-          hasTavernHelperScripts: store.getTavernHelperScripts().length > 0,
-        }) || data.rendered_html || ''
-      : data.rendered_html || '';
-    appendAssistantMessage(messageArea, html);
-
-    await ports.lifecycle.emit('afterGenerate', {
-      userMessage: message,
-      raw: data.raw_text ?? data.raw ?? null,
-      renderedHtml: html,
-      promptDebug: data.prompt_debug || null,
-      messageId: store.getRuntime()?.runtimeState?.messages?.length ?? null,
-    });
+    await kernel.sendUserMessage(message);
+    shell.clearChatStatus?.();
   } catch (error) {
-    const node = document.createElement('div');
-    node.className = 'st-error-message';
-    node.textContent = `发送失败: ${error instanceof Error ? error.message : String(error)}`;
-    messageArea.appendChild(node);
-  } finally {
-    appState.sending = false;
-    shell.setSending(false);
+    // Kernel onSendError already surfaces status outside the message root.
+    // Restore draft so a failed generate is not a silent data loss.
+    shell.setUserInput?.(message);
+    console.warn('[ConclaveSTHost] sendUserMessage failed:', error);
   }
 }
 
@@ -1532,6 +1549,17 @@ kernel = createSessionKernel({
   shell,
   createRuntime,
   lifecycle: ports.lifecycle,
+  ports,
+  messageMount,
+  chatApi: async body => {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  },
   hooks: {
     clearPendingRefreshTimers,
     cleanupCardArtifacts,
@@ -1547,6 +1575,14 @@ kernel = createSessionKernel({
       destroyCardIframe();
       appState.activeView = 'opening';
       appState.openingMessageNode = null;
+      messageMount.teardown();
+      // Mind onSessionEnd safety net (also listens to lifecycle sessionTeardown).
+      // Ensures MemoryStore + injection do not bleed across card import/select.
+      if (mind) {
+        mind.resetSession();
+        store.setMind(null);
+        mindDebugPanel?.refresh();
+      }
     },
     renderShell,
     beginCardArtifactTracking,
@@ -1554,12 +1590,32 @@ kernel = createSessionKernel({
     executeTavernHelperScripts,
     showError,
     installCapabilities,
+    isSending: () => appState.sending,
+    setSending(sending) {
+      appState.sending = !!sending;
+      shell.setSending(!!sending);
+    },
+    onSendError(error) {
+      // Outside #st-message-area — never inject untracked DOM into MessageMount root.
+      const text = `发送失败: ${error instanceof Error ? error.message : String(error)}`;
+      if (typeof shell.setChatStatus === 'function') {
+        shell.setChatStatus(text);
+      } else {
+        shell.setDiagnostics?.(text);
+      }
+    },
+    renderAssistantDisplay(raw, backendHint = '') {
+      return renderDisplayHtml(raw, backendHint);
+    },
+    onLeaveOpeningForChat: leaveOpeningForChat,
   },
 });
 
-// Expose ports for debug / future Mind bootstrap (not a public ST API).
+// Expose ports / mind for debug (not a public ST API).
 if (typeof window !== 'undefined') {
   window.__conclavePorts = ports;
+  window.__conclaveKernel = kernel;
+  window.__conclaveMind = mind;
 }
 
 window.addEventListener('error', event => {

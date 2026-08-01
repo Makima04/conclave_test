@@ -3,6 +3,11 @@
  * @module session/SessionStore
  */
 
+import {
+  applyMvuToRuntimeState,
+  buildChatMessageEntry,
+} from '../shared/chatTranscript.js';
+
 /**
  * @returns {import('./types.js').SessionSnapshot}
  */
@@ -22,6 +27,8 @@ function createEmptySnapshot() {
     requirements: null,
     runtime: null,
     capabilities: null,
+    /** Mind snapshot when feature flag on; always null when Mind off (PR-11). */
+    mind: null,
   };
 }
 
@@ -196,6 +203,73 @@ export function createSessionStore() {
     snapshot.requirements = null;
     snapshot.runtime = null;
     snapshot.capabilities = null;
+    snapshot.mind = null;
+  }
+
+  /**
+   * PR-11: Mind snapshot (null when feature flag off).
+   * @returns {object|null}
+   */
+  function getMind() {
+    return snapshot.mind;
+  }
+
+  /**
+   * @param {object|null} mind
+   */
+  function setMind(mind) {
+    snapshot.mind = mind == null ? null : mind;
+  }
+
+  /**
+   * PR-07: Session-facing view of chat transcript (runtimeState.messages).
+   * TH getChatMessages / MessageMount read this same array.
+   * @returns {object[]}
+   */
+  function getMessages() {
+    const list = snapshot.runtime?.runtimeState?.messages;
+    return Array.isArray(list) ? list : [];
+  }
+
+  /**
+   * PR-07: Session-facing MVU snapshot (runtimeState.mvuData).
+   * @returns {object}
+   */
+  function getMvu() {
+    return snapshot.runtime?.runtimeState?.mvuData || {};
+  }
+
+  /**
+   * PR-07: Append a chat message to Session transcript.
+   * Production Kernel write path is ports.transcript.append; this is a thin
+   * mirror for tests/TH that shares field shape via shared/chatTranscript.
+   * @param {Partial<import('./types.js').ChatMessage>} msg
+   * @returns {object}
+   */
+  function appendMessage(msg = {}) {
+    const state = snapshot.runtime?.runtimeState;
+    if (!state || !Array.isArray(state.messages)) {
+      throw new Error('SessionStore.appendMessage: runtime messages unavailable');
+    }
+    const entry = buildChatMessageEntry(state.messages.length, msg);
+    state.messages.push(entry);
+    return entry;
+  }
+
+  /**
+   * PR-07: Replace session MVU and latest assistant message data (server new_state).
+   * Production Kernel write path is ports.transcript.replaceMvu; shares apply
+   * logic with Ports via shared/chatTranscript.applyMvuToRuntimeState.
+   * @param {object} mvu
+   * @param {string} [reason]
+   */
+  function replaceMvu(mvu, reason = 'session.replaceMvu') {
+    const state = snapshot.runtime?.runtimeState;
+    if (!state) {
+      throw new Error('SessionStore.replaceMvu: runtime unavailable');
+    }
+    applyMvuToRuntimeState(state, mvu);
+    void reason;
   }
 
   return {
@@ -221,6 +295,12 @@ export function createSessionStore() {
     setCapabilities,
     applyInitPayload,
     resetCardData,
+    getMind,
+    setMind,
+    getMessages,
+    getMvu,
+    appendMessage,
+    replaceMvu,
   };
 }
 

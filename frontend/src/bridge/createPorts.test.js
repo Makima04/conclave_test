@@ -51,6 +51,14 @@ describe('createPorts', () => {
 
     ports.transcript.replaceMvu({ stat_data: { hp: 1 } }, 'test')
     expect(ports.transcript.getMvu()).toEqual({ stat_data: { hp: 1 } })
+    // user is last → replaceMvu does not rewrite user.data
+    expect(ports.transcript.getMessages()[0].data).toEqual({})
+
+    ports.transcript.append({ role: 'assistant', message: 'yo' })
+    ports.transcript.replaceMvu({ stat_data: { hp: 2 } }, 'after-assistant')
+    expect(ports.transcript.getMvu()).toEqual({ stat_data: { hp: 2 } })
+    expect(ports.transcript.getMessages()[1].data).toEqual({ stat_data: { hp: 2 } })
+
     expect(() => ports.transcript.replaceMvu({}, '')).toThrow(/reason/)
 
     ports.promptInjection.set('mind.primary', {

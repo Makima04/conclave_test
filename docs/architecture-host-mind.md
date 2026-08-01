@@ -6,8 +6,8 @@
 | **作者** | Conclave Architecture（设计稿） |
 | **P0 DRI** | 开工时在 PR-01a 指定单一负责人；未指定前不得并行改 `main.js` 与后端初始状态 |
 | **日期** | 2026-08-01 |
-| **修订** | 2026-08-01 r3 — 记录 PR-01a～PR-06 落地状态（见 §PR Plan / Implementation Log） |
-| **状态** | In progress — P0 主体已落地；P1 中（PR-06 完成，PR-07 chat 同步待做） |
+| **修订** | 2026-08-01 r4 — 记录 PR-07～PR-12 落地状态（见 §PR Plan / Implementation Log） |
+| **状态** | In progress — P0 主体已落地；P1 中（PR-07 chat 同步完成）；P3 Mind MVP+调参（PR-11/12）完成 |
 | **项目路径** | `/Users/makima/program/Conclave` |
 | **ST 参考源码** | `/Users/makima/program/SillyTavern-release` |
 | **取代方向** | `docs/st-api-compat-plan.md` / `docs/st-api-compat-log.md`（历史补丁日志保留；架构方向以本文为准） |
@@ -929,33 +929,28 @@ function extractCandidates(messages, npc):
   window = last K messages
   blobs = []
   for m in window where m.role in {user, assistant}:
-    for line in split lines / 。 / .
+    for line in splitCandidateLines(m):  // \n + 。！？；… + .!?;
       t = trim(line)
       if len(t) < 8 or len(t) > 200: continue
-      if looksLikeUiChrome(t): continue   // HTML tags, StatusPlaceHolder, _.set dumps
+      if looksLikeUiChrome(t): continue   // HTML, StatusPlaceHolder, _.set, JSON/CSS/fence…
       blobs.append(t)
   // 优先含实体线索的行
   scored = sort blobs by (hasNameHint, length) desc
-  take top N
-  for each text:
-    yield MemoryRecord{
-      npcId: npc.id,
-      text: text,
-      labels: ['knowledge/unspecified'],  // MVP 默认 axis=knowledge
-      scores: { knowledge: 0.5 },
-      sourceMessageId: last assistant id,
-      contentHash: hash(npc.id + normalize(text)),
-      status: 'active'
-    }
+  accepted = []
+  for text in scored:
+    if len(accepted) >= N: break
+    if exact normalize dup or nearDup(text, accepted): continue  // PR-12 Jaccard/containment
+    accepted.append(text)
+    yield MemoryRecord{ … labels knowledge/unspecified, scores.knowledge=0.5 … }
 ```
 
 **失败模式：**
 
 - 无候选 → 不写记忆，diagnostics `mind.extract_empty`  
 - 异常 → catch + `diagnostics.log(error)`，**不**阻断 chat  
-- 语言：中英混合按空白/标点切；不做翻译  
+- 语言：中英混合按句读/换行切；不做翻译  
 
-**可选 LLM 抽取：** P4；接口 `Extractor` 可替换，PR-11 只实现 `RuleExtractor`。
+**可选 LLM 抽取：** P4；接口 `Extractor` 可替换，PR-11 实现 `RuleExtractor`，PR-12 调参（chrome / 近重 / 句切）。
 
 #### 6.3 记忆生命周期
 
@@ -985,8 +980,8 @@ flowchart TD
 | 每会话 active 上限 | 200 |
 | 单 NPC active 上限 | 120 |
 | TTL | 无硬 TTL；按 `salience * recency` 淘汰 |
-| 淘汰顺序 | `status=archived` 优先；再按 `score = 0.6*max(scores)+0.3*recency+0.1*log(access)` 升序 purge |
-| 触发 | 每 N 条新记忆 / 每 turn 结束 / 手动 Debug 按钮 |
+| 淘汰顺序 | `status=archived` 优先；再按 `score = 0.55*max(scores)+0.35*recency+0.1*log1p(access)` 升序 purge（PR-12：recency 取 max(lastAccessedAt, updatedAt, createdAt)；并列按 createdAt/accessCount/id） |
+| 触发 | 每 turn insert 后强制 `enforceActiveCaps`（session 200 / npc 120）；可手动 Debug |
 
 **Retrieval（注入）：**
 
@@ -1387,9 +1382,9 @@ fn initial_game_state(card: &CardData) -> Value {
 | Phase | 主题 | 出口标准 | 状态（r3） |
 |-------|------|----------|------------|
 | **P0** | 拆分 + SessionKernel + CapabilityRegistry + 去苍玄硬编码 + 边界 lint | 状态机切换卡；requirements→install；无内核 cangxuan 默认；eslint 边界生效；**目标** `main.js` 精简 bootstrap（可延后） | **主体完成**（01a–05）；`main.js` 仍为编排中枢（未压到 150 行） |
-| **P1** | FE test harness + Display RenderPipeline + MessageMount + chat 同步 | vitest golden；StatusPlaceHolder 预通道；N 轮后 TH/DOM/Session 一致 | **进行中**：05.5+06 完成；**PR-07 未做** |
-| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | **进行中**：PR-09 iframe+bridge+ADR ✅；PR-10 getContext P2 + ExtensionManager 骨架 ✅ |
-| **P3** | Mind MVP | mock 下 `prompt_debug`+面板含 Mind 块；flag off 无回归 | 未开始 |
+| **P1** | FE test harness + Display RenderPipeline + MessageMount + chat 同步 | vitest golden；StatusPlaceHolder 预通道；N 轮后 TH/DOM/Session 一致 | **主体完成**：05.5+06+07；MessageMount 列表路径已接 Kernel |
+| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | **完成**：PR-08/09/10 ✅（iframe flag 默认 off） |
+| **P3** | Mind MVP | mock 下 `prompt_debug`+面板含 Mind 块；flag off 无回归 | **完成**（PR-11 MVP + PR-12 调参/文档；默认 flag off） |
 | **P4** | 真 LLM / 多会话 / 任意扩展 / E2E | 真模型；E2E 卡集 | 未开始 |
 
 ### 回滚
@@ -1414,12 +1409,12 @@ fn initial_game_state(card: &CardData) -> Value {
 
 ### Implementation Log（已实现汇总）
 
-> 本地 monorepo 以 **git commit 栈**落地（未必拆成远端 PR）；下表为 r3 事实进度。  
-> 命令基线（2026-08-01 验证）：`npm test` 40 passed · `cargo test` 19 passed · lint / boundaries / build 绿。
+> 本地 monorepo 以 **git commit 栈**落地（未必拆成远端 PR）；下表为 **r5** 事实进度（G1 iframe 栈 PR-07..10 与 G2 Mind 栈 PR-11..12 已合并到本工作区基线）。  
+> 命令基线以合入后 `npm test && npm run lint && npm run build && cargo test` 为准。
 
 | 项 | 状态 | 代表 commit / 说明 |
 |----|------|-------------------|
-| 设计稿 r2 | ✅ | `docs/architecture-host-mind.md` |
+| 设计稿 r2→r4 | ✅ | `docs/architecture-host-mind.md` |
 | PR-01a shared 搬迁 | ✅ | 合入 `4bf5c1d` |
 | PR-01b HostShell + diagnostics strip | ✅ | 合入 `4bf5c1d` |
 | PR-01c import 边界 lint + check 脚本 | ✅ | `eslint.config.js` + `scripts/check-import-boundaries.mjs`（ESLint 10 用 `no-restricted-imports`，非 plugin-import） |
@@ -1430,20 +1425,24 @@ fn initial_game_state(card: &CardData) -> Value {
 | PR-05 Ports + EventBus + Lifecycle | ✅ | `bridge/*`, `st-host/context/EventBus.js` · commit `e4a12ba` |
 | PR-05.5 Vitest harness | ✅ | `vitest` · `npm test` · commit `e4a12ba` |
 | PR-06 Display RenderPipeline | ✅ | `st-host/render/*` · `InitResponse.regex_scripts` + `session_epoch` · commit `9c86e11` |
+| **PR-07** Chat 同步 | ✅ | `kernel.sendUserMessage` Session-first；MessageMount；apply `new_state` |
 | PR-08 ScriptRunner harden | ✅ | `st-host/ScriptRunner.js` abort/namespace/teardown |
-| PR-09 Card iframe + BridgeProtocol v1 | ✅ | `st-host/isolation/*` · flag `card_iframe` default off · Sandbox ADR · review fixes: remount listener reset, updateVariablesWith client-side apply, source checks |
-| **PR-07** Chat 同步 | 🔲 | **下一步** |
-| PR-08…PR-13 | 🔲 | 未开始 |
+| PR-09 Card iframe + BridgeProtocol v1 | ✅ | `st-host/isolation/*` · flag `card_iframe` default off · Sandbox ADR |
+| PR-10 getContext P2 + ExtensionManager | ✅ | ContextFactory P2 + ExtensionManager skeleton |
+| **PR-11** Mind MVP（flag 默认 off） | ✅ | `frontend/src/mind/*` RuleExtractor/store/cleanup/retrieve/compose + Debug panel |
+| **PR-12** Mind 调参 + 文档 | ✅ | 抽取调参；cleanup 硬上限；50-turn cap 单测 |
+| PR-13 真 LLM + E2E | 🔲 | 下一步（合并 G1+G2 栈后） |
 
 **落地偏差（已知，不阻塞后续 PR）：**
 
 | 计划项 | 现状 |
 |--------|------|
-| `main.js <150` bootstrap | **未达**：仍为编排中枢（createRuntime / TH 表面等）；Ports/Kernel 已抽出，收尾可另开 PR |
-| MessageMount | PR-06 仅 **薄骨架**；任意 messageId 挂载与列表重绘属 **PR-07** |
+| `main.js <150` bootstrap | **未达**：仍为编排中枢（createRuntime / TH 表面等）；Ports/Kernel/Mind 已抽出，收尾可另开 PR |
+| MessageMount | PR-07 已接 Kernel chat 路径；完整 DOM 气泡列表仍随 shell 演进 |
 | 后端 `rendered_html` | **保留为 hint**；默认 `display_regex_fe=on` 时 FE `processDisplay` 权威；`=0` 可回退 |
 | Capability 与 surface 创建顺序 | createRuntime 先建 TH/Mvu 再 `registry.install` 报告；catalog 驱动「从零创建 surface」仍为未来项 |
-| Chat 路径 | `sendUserMessage` 仍在 `main.js` 私有 fetch；**未** Session-first append（PR-07） |
+| Chat 路径 | **PR-07 已** Session-first `kernel.sendUserMessage`；Mind 仅经 Ports |
+| Mind 持久化 | **MVP 前端 only**（PR-12 未加 persistence；与 Open Q#2 一致） |
 
 ### 关键路径（两条）
 
@@ -1453,8 +1452,9 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 （PR-03 后端中性化 ∥ PR-02；PR-03-fe 默认剥离依赖 PR-02）
 （PR-05.5 test harness 在 PR-06 之前，可与 PR-05 并行）
 
-已完成:  01a 01b 01c 02 03 03-fe 04 05 05.5 06
-下一步:  07
+已完成(本栈):  01a 01b 01c 02 03 03-fe 04 05 05.5 06 07 11 12
+下一步(G1):    08 → 09 → 10
+下一步(G2/P4): 13（真 LLM / E2E；可选 persistence）
 ```
 
 ### PR-01a — 纯机械搬迁（无新抽象） · ✅
@@ -1524,18 +1524,20 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 - **与 Rust 差异（有意）：** 空 `placement` 按 ST **跳过**脚本（golden 用 `placement: [2]`）；depth / runOnEdit 已实现  
 - commit `9c86e11`
 
-### PR-07 — Chat 同步：消灭三重漂移 · 🔲 **下一步**
+### PR-07 — Chat 同步：消灭三重漂移 · ✅
 **依赖：** PR-05, PR-06  
 **描述：** `kernel.sendUserMessage`；Session 先 append；MessageMount 任意 messageId；apply `new_state`；ChatRequest/Response 字段；shell 删除私有 fetch 路径。  
 **验收：**  
 - N=3 轮后 `messages.length`、可见气泡、`getChatMessages` 一致  
 - `getChatMessages('latest')` 为最后 assistant  
 - `mvu` 与 `new_state` 一致  
+**落地说明：** `SessionKernel.sendUserMessage` Session-first；`MessageMount` 更新；`replaceMvu(new_state, 'chat.new_state')`；lifecycle `beforeGenerate`/`afterGenerate`；commit `ce114e8`，review `da6aa93`。
 
-### PR-08 — ScriptRunner 生命周期 harden · 🔲
+### PR-08 — ScriptRunner 生命周期 harden · ✅
 **依赖：** PR-04, PR-06  
 **描述：** 统一 abort/namespace/teardown；与 MessageMount 协同。  
-**验收：** 连切 3 卡无残留节点/监听。
+**验收：** 连切 3 卡无残留节点/监听。  
+**落地：** `st-host/ScriptRunner.js`；abort/namespace/teardown；remote import 默认拒绝。
 
 ### PR-09 — Card iframe + BridgeProtocol v1 · ✅
 **依赖：** PR-08  
@@ -1552,15 +1554,36 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 - Catalog `register`/`unregister`；非完整 ST 扩展商店 / git install（P4）
 **验收：** 扩展 activate；context 字段表勾选完成（见 §5.1 矩阵 PR-10 进度）。
 
-### PR-11 — Mind MVP（默认 flag off） · 🔲
+### PR-11 — Mind MVP（默认 flag off） · ✅
 **依赖：** PR-07, PR-05（**不**强制 PR-06，但需 prompt_debug 后端；建议 07 后）  
 **描述：** RuleExtractor §6.2.1；store/dedupe/cleanup/retrieve/compose；Debug panel；后端拼接 injections → `prompt_debug`。  
-**验收：** `?mind=1` 时面板 last injection 与 `prompt_debug` Mind 块一致；flag off 零副作用；无 mvu 写回。
+**验收：** `?mind=1` 时面板 last injection 与 `prompt_debug` Mind 块一致；flag off 零副作用；无 mvu 写回。  
+**落地说明：**  
+- FE：`frontend/src/mind/{RuleExtractor,MemoryStore,cleanup,dedupe,retrieval,promptCompose,MindService,MindDebugPanel,flags,taxonomy,types}.js`  
+- 默认 `conclave:feature:mind` off / 仅 `?mind=1` 或 localStorage=`1` 启用；flag off 不创建 service  
+- Ports only：`beforeGenerate` 写 `mind.primary`；`afterGenerate` 抽取；`sessionTeardown` 清记忆  
+- 不写 mvu/lorebook/chat；commit `eca7e78`，review `cb27809`
 
-### PR-12 — Mind 调参 + 文档 · 🔲
+### PR-12 — Mind 调参 + 文档 · ✅
 **依赖：** PR-11  
 **描述：** 抽取质量；cleanup；实现备注写回 `docs/architecture-host-mind.md`。  
-**验收：** 50 turn 记忆受控。
+**验收：** 50 turn 记忆受控。  
+**落地说明（实现备注）：**  
+1. **RuleExtractor 质量**  
+   - `looksLikeUiChrome`：StatusPlaceHolder / `_.set` / HTML / UpdateVariable / JSON dump / CSS 块 / code fence / import / data-URI / 低字母占比 / 纯 URL  
+   - `splitCandidateLines`：换行 + 中文 `。！？；…` + 英文 `.!?;`（避免 `Mr.` 类误切的轻量 lookbehind）  
+   - 近重：`textSimilarity`（Jaccard ∪ 短集 containment）≥ `NEAR_DUP_THRESHOLD(0.82)` 时同 turn 跳过；仍保留 exact `normalizeText` 去重  
+2. **Cleanup 硬化**  
+   - `retentionScore`：`0.55*max(scores)+0.35*recency+0.10*log1p(access)`；recency 取 `max(lastAccessedAt, updatedAt, createdAt)`  
+   - `purgeCompare` 稳定排序（retention → createdAt → accessCount → id）  
+   - `enforceActiveCaps`：先 per-NPC cap 再 session cap，二次保险；`MemoryStore.insertMany` 后强制 re-check  
+   - 默认 cap 仍为 session **200** / npc **120**（`DEFAULT_*` 导出）  
+3. **验收单测**  
+   - `mind.test.js`：模拟 50 turn extract+insert，全程 `activeCount ≤ min(sessionCap,npcCap)`  
+4. **持久化**  
+   - **未**做 FE/BE persistence（设计允许 PR-12 可选；保持 MVP 内存 only）  
+5. **文档**  
+   - 本文 Implementation Log / 阶段表 / PR-07…12 条目更新为 r4
 
 ### PR-13 — 真 LLM + E2E 烟测（P4 起） · 🔲
 **依赖：** PR-11, PR-10  
@@ -1580,7 +1603,8 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 | Vitest harness | PR-05.5 | ✅ |
 | Display RenderPipeline + regex_scripts | PR-06 | ✅ |
 | `main.js <150` bootstrap | PR-04/05 收尾 | 🟡 延后（编排仍在 main） |
-| Chat 三重一致 | PR-07 | 🔲 下一步 |
+| Chat 三重一致 | PR-07 | ✅ |
+| Mind MVP + 调参 | PR-11 / PR-12 | ✅ |
 
 ## Risks
 
@@ -1602,7 +1626,7 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 > 六项关键决策已全部拍板（见 Key Decisions）。以下仅列非阻塞残留项；**不阻碍 P0 开工**。
 
 1. ~~iframe `sandbox` 最终默认是否包含 `allow-same-origin`~~ — **RESOLVED PR-09**：默认 **无** `allow-same-origin`（仅 `allow-scripts`）；存储走 bridge；flag `conclave:feature:iframe_same_origin=1` 为 residual-risk 回退（见 §5.3 Sandbox ADR）。  
-2. Mind 记忆是否 P3 即持久化到 `backend/data/mind`——MVP 前端 only；PR-12 可选。  
+2. Mind 记忆是否 P3 即持久化到 `backend/data/mind`——MVP 前端 only；**PR-12 未做 persistence**（仍可选，延后）。  
 3. 是否 WASM 共享正则（A7）——P1 golden 稳定后再评估。
 
 ---
@@ -1639,4 +1663,4 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 
 ---
 
-*本文档为 Draft r2（review 修订后）。P0 按 PR-01a 开工即可；实现偏差应修订本文 + PR 说明，禁止 `main.js` 旁路补丁。*
+*本文档为 Draft r4（PR-07/11/12 落地后）。实现偏差应修订本文 + PR 说明，禁止 `main.js` 旁路补丁。*

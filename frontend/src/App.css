@@ -45,6 +45,48 @@
   display: none;
 }
 
+/* Mind Debug Panel (PR-11); only mounted when conclave:feature:mind / ?mind=1 */
+.st-mind-debug {
+  flex-shrink: 0;
+  padding: 6px 14px 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #a5b4fc;
+  background: rgba(30, 27, 75, 0.55);
+  border-bottom: 1px solid rgba(129, 140, 248, 0.22);
+  max-height: 140px;
+  overflow: auto;
+}
+
+.st-mind-debug[hidden] {
+  display: none;
+}
+
+.st-mind-debug-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-bottom: 4px;
+}
+
+.st-mind-debug-row strong {
+  color: #c7d2fe;
+}
+
+.st-mind-debug-preview {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: #e0e7ff;
+  background: rgba(15, 17, 23, 0.55);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 72px;
+  overflow: auto;
+}
+
 .st-host-brand,
 .st-host-actions {
   display: flex;

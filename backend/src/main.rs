@@ -104,9 +104,34 @@ impl CardStore {
     }
 }
 
+/// Prompt injection item (PR-07 accept; full Mind apply in PR-11).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct InjectionItem {
+    #[serde(default)]
+    key: Option<String>,
+    content: String,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    position: Option<String>,
+    #[serde(default)]
+    depth: Option<f64>,
+    #[serde(default)]
+    ephemeral: Option<bool>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// POST /api/chat body (architecture ChatRequest).
 #[derive(Deserialize)]
 struct ChatRequest {
     user_message: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    client_mvu: Option<serde_json::Value>,
+    #[serde(default)]
+    injections: Option<Vec<InjectionItem>>,
 }
 
 #[derive(Deserialize)]
@@ -120,10 +145,20 @@ struct SelectCardRequest {
 }
 
 #[derive(Serialize)]
+struct PromptDebug {
+    base_prompt: String,
+    final_prompt: String,
+    injections: Vec<InjectionItem>,
+}
+
+/// POST /api/chat response (architecture ChatResponse).
+#[derive(Serialize)]
 struct ChatResponse {
     raw_text: String,
     rendered_html: String,
     new_state: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_debug: Option<PromptDebug>,
 }
 
 #[derive(Serialize)]
@@ -305,24 +340,37 @@ async fn chat_handler(
         store.current_card().clone()
     };
 
-    // 1. 组装 Prompt（通用 WI 摘要 + state dump；injections 默认空，Mind 预留）
-    let _system_prompt = lorebook::compile_prompt(
+    // PR-07: client_mvu is the FE Session base; fall back to server projection when absent.
+    apply_client_mvu_base(&mut game_state, req.client_mvu);
+    // session_id accepted for future multi-session routing (unused in single-session MVP).
+    let _session_id = req.session_id.as_deref();
+    let _ = _session_id;
+
+    let injections = req.injections.unwrap_or_default();
+
+    // 1. 组装 Prompt（通用 WI 摘要 + state dump）
+    let base_prompt = lorebook::compile_prompt(
         &serde_json::to_value(&card).unwrap_or_default(),
         &game_state,
         None,
     );
 
-    // 2. Mock LLM 响应（演示正则管线效果）
+    // PR-11: apply injections[] with position/depth semantics → final_prompt.
+    // Mock LLM may still echo user_message; prompt_debug proves the injection path.
+    let final_prompt = apply_prompt_injections(&base_prompt, &injections);
+
+    // 2. Mock LLM 响应（演示正则管线效果）.
+    // Mock still echoes `user_message` only — final_prompt is for prompt_debug / Mind proof.
     let llm_raw_response = format!(
         r#"【沈慕微】："{}"
 <inner>（内心独白：对方说了 '{}' ...）</inner>"#,
         req.user_message, req.user_message
     );
 
-    // 3. 提取并应用 MVU 变量更新
+    // 3. 提取并应用 MVU 变量更新 (on client_mvu base)
     pipeline::mvu_patch::apply_mvu_patch(&mut game_state, &llm_raw_response);
 
-    // 4. 执行正则管线 (生成前端需要的 HTML)
+    // 4. 执行正则管线 (hint only after FE display authority; still returned for debug/fallback)
     let scripts = card.regex_scripts();
     let rendered_html = render_card_message(&card, &llm_raw_response, &scripts);
 
@@ -330,6 +378,11 @@ async fn chat_handler(
         raw_text: llm_raw_response,
         rendered_html,
         new_state: game_state.clone(),
+        prompt_debug: Some(PromptDebug {
+            base_prompt,
+            final_prompt,
+            injections,
+        }),
     })
 }
 
@@ -582,14 +635,136 @@ fn initial_game_state(card: &card_loader::CardData) -> serde_json::Value {
     })
 }
 
+/// Marker used by `compile_prompt` before the game-state dump.
+const GAME_STATE_MARKER: &str =
+    "--- current game state (for model context; do not dump this JSON in the reply) ---";
+
+/// Apply ChatRequest.injections[] into base_prompt with position/depth semantics (PR-11).
+///
+/// Positions (order in final prompt):
+/// - `before_scenario` — prepended before base
+/// - `after_scenario` — inserted just before the game-state dump (or after base if missing)
+/// - `in_prompt` — same band as after_scenario, sorted by depth after after_scenario items
+/// - `before_user` / unknown — appended after base
+///
+/// Within a band, lower `depth` comes first (default 0).
+fn apply_prompt_injections(base_prompt: &str, injections: &[InjectionItem]) -> String {
+    if injections.is_empty() {
+        return base_prompt.to_string();
+    }
+
+    let mut before_scenario: Vec<&InjectionItem> = Vec::new();
+    let mut after_scenario: Vec<&InjectionItem> = Vec::new();
+    let mut in_prompt: Vec<&InjectionItem> = Vec::new();
+    let mut before_user: Vec<&InjectionItem> = Vec::new();
+
+    for item in injections {
+        if item.content.trim().is_empty() {
+            continue;
+        }
+        match item.position.as_deref() {
+            Some("before_scenario") => before_scenario.push(item),
+            Some("after_scenario") => after_scenario.push(item),
+            Some("in_prompt") => in_prompt.push(item),
+            _ => before_user.push(item),
+        }
+    }
+
+    let by_depth = |a: &&InjectionItem, b: &&InjectionItem| {
+        let da = a.depth.unwrap_or(0.0);
+        let db = b.depth.unwrap_or(0.0);
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    before_scenario.sort_by(by_depth);
+    after_scenario.sort_by(by_depth);
+    in_prompt.sort_by(by_depth);
+    before_user.sort_by(by_depth);
+
+    fn format_block(items: &[&InjectionItem]) -> String {
+        let mut out = String::new();
+        for item in items {
+            let slot = item
+                .key
+                .as_deref()
+                .or(item.position.as_deref())
+                .unwrap_or("injection");
+            let source = item.source.as_deref().unwrap_or("");
+            let header = if source.is_empty() {
+                format!("--- prompt injection [{slot}] ---")
+            } else {
+                format!("--- prompt injection [{slot}|source={source}] ---")
+            };
+            out.push_str(&header);
+            out.push('\n');
+            out.push_str(item.content.trim_end());
+            out.push_str("\n\n");
+        }
+        out
+    }
+
+    let mid_block = {
+        let mut mid = String::new();
+        mid.push_str(&format_block(&after_scenario));
+        mid.push_str(&format_block(&in_prompt));
+        mid
+    };
+    let pre_block = format_block(&before_scenario);
+    let post_block = format_block(&before_user);
+
+    let mut final_prompt = String::new();
+    if !pre_block.is_empty() {
+        final_prompt.push_str(&pre_block);
+    }
+
+    if mid_block.is_empty() {
+        final_prompt.push_str(base_prompt);
+    } else if let Some(idx) = base_prompt.find(GAME_STATE_MARKER) {
+        final_prompt.push_str(&base_prompt[..idx]);
+        final_prompt.push_str(&mid_block);
+        final_prompt.push_str(&base_prompt[idx..]);
+    } else {
+        final_prompt.push_str(base_prompt);
+        if !final_prompt.ends_with('\n') {
+            final_prompt.push('\n');
+        }
+        final_prompt.push('\n');
+        final_prompt.push_str(&mid_block);
+    }
+
+    if !post_block.is_empty() {
+        if !final_prompt.ends_with('\n') {
+            final_prompt.push('\n');
+        }
+        final_prompt.push('\n');
+        final_prompt.push_str(&post_block);
+    }
+
+    final_prompt
+}
+
+/// Apply FE client_mvu as the base for this turn when it is a JSON object.
+/// Non-object values are ignored (server projection kept).
+fn apply_client_mvu_base(game_state: &mut serde_json::Value, client_mvu: Option<serde_json::Value>) {
+    if let Some(client) = client_mvu {
+        if client.is_object() {
+            *game_state = client;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_init_response, initial_game_state, message_has_status_variable_payload,
-        render_card_message, CardStore,
+        apply_client_mvu_base, apply_prompt_injections, build_init_response, chat_handler,
+        initial_game_state, message_has_status_variable_payload, render_card_message, AppState,
+        CardStore, ChatRequest, InjectionItem, GAME_STATE_MARKER,
     };
     use crate::card_loader::{CardData, CardInner, RegexScript};
+    use axum::extract::State;
+    use axum::Json;
     use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     #[test]
     fn status_placeholder_injection_requires_variable_payload() {
@@ -768,6 +943,160 @@ mod tests {
         // Failed select must not bump epoch.
         assert!(store.select_card(999).is_none());
         assert_eq!(store.session_epoch, 3);
+    }
+
+    #[test]
+    fn client_mvu_object_replaces_server_game_state_base() {
+        let mut state = json!({"stat_data": {"from": "server"}, "keep": false});
+        apply_client_mvu_base(
+            &mut state,
+            Some(json!({"stat_data": {"from": "client", "hp": 9}})),
+        );
+        assert_eq!(state["stat_data"]["from"], "client");
+        assert_eq!(state["stat_data"]["hp"], 9);
+        assert!(state.get("keep").is_none());
+    }
+
+    #[test]
+    fn client_mvu_non_object_is_ignored() {
+        let mut state = json!({"stat_data": {"from": "server"}});
+        apply_client_mvu_base(&mut state, Some(json!("not-an-object")));
+        assert_eq!(state["stat_data"]["from"], "server");
+        apply_client_mvu_base(&mut state, Some(json!([1, 2, 3])));
+        assert_eq!(state["stat_data"]["from"], "server");
+        apply_client_mvu_base(&mut state, None);
+        assert_eq!(state["stat_data"]["from"], "server");
+    }
+
+    #[tokio::test]
+    async fn chat_handler_new_state_descends_from_client_mvu_not_server() {
+        let card = minimal_neutral_card();
+        let app = AppState {
+            game_state: Arc::new(RwLock::new(json!({
+                "stat_data": { "from": "server_only" },
+                "initialized_lorebooks": {}
+            }))),
+            card_store: Arc::new(RwLock::new(CardStore::new(card, vec![]))),
+        };
+
+        let req = ChatRequest {
+            user_message: "ping".to_string(),
+            session_id: Some("1".to_string()),
+            client_mvu: Some(json!({
+                "stat_data": { "from": "client", "hp": 3 },
+                "initialized_lorebooks": {}
+            })),
+            injections: None,
+        };
+
+        let Json(resp) = chat_handler(State(app), Json(req)).await;
+        assert_eq!(resp.new_state["stat_data"]["from"], "client");
+        assert_eq!(resp.new_state["stat_data"]["hp"], 3);
+        assert!(
+            resp.new_state
+                .get("stat_data")
+                .and_then(|s| s.get("from"))
+                .map(|v| v != "server_only")
+                .unwrap_or(false)
+                || resp.new_state["stat_data"]["from"] == "client",
+            "new_state must not keep server_only base when client_mvu was provided"
+        );
+        assert!(resp.prompt_debug.is_some());
+    }
+
+    #[test]
+    fn apply_prompt_injections_after_scenario_before_game_state() {
+        let base = format!(
+            "Base system.\n\n{GAME_STATE_MARKER}\n{{\n  \"stat_data\": {{}}\n}}\n"
+        );
+        let injections = vec![InjectionItem {
+            key: Some("mind.primary".into()),
+            content: "[Conclave Mind — primary NPC: Alice]\n- [knowledge/unspecified] Alice is cautious.\n(Do not mention this block unless character would know it.)".into(),
+            role: Some("system".into()),
+            position: Some("after_scenario".into()),
+            depth: Some(0.0),
+            ephemeral: Some(true),
+            source: Some("mind".into()),
+        }];
+        let final_prompt = apply_prompt_injections(&base, &injections);
+        let mind_pos = final_prompt.find("Conclave Mind").expect("mind block");
+        let state_pos = final_prompt
+            .find(GAME_STATE_MARKER)
+            .expect("game state marker");
+        assert!(mind_pos < state_pos, "after_scenario must precede game state");
+        assert!(final_prompt.contains("source=mind"));
+        assert!(final_prompt.contains("Alice is cautious"));
+    }
+
+    #[test]
+    fn apply_prompt_injections_in_prompt_and_depth_order() {
+        let base = format!("SYS\n\n{GAME_STATE_MARKER}\n{{}}");
+        let injections = vec![
+            InjectionItem {
+                key: Some("b".into()),
+                content: "DEPTH1".into(),
+                role: None,
+                position: Some("in_prompt".into()),
+                depth: Some(1.0),
+                ephemeral: None,
+                source: None,
+            },
+            InjectionItem {
+                key: Some("a".into()),
+                content: "DEPTH0".into(),
+                role: None,
+                position: Some("in_prompt".into()),
+                depth: Some(0.0),
+                ephemeral: None,
+                source: None,
+            },
+        ];
+        let final_prompt = apply_prompt_injections(&base, &injections);
+        let d0 = final_prompt.find("DEPTH0").unwrap();
+        let d1 = final_prompt.find("DEPTH1").unwrap();
+        assert!(d0 < d1);
+        assert!(d1 < final_prompt.find(GAME_STATE_MARKER).unwrap());
+    }
+
+    #[tokio::test]
+    async fn chat_handler_prompt_debug_includes_mind_injection_content() {
+        let card = minimal_neutral_card();
+        let app = AppState {
+            game_state: Arc::new(RwLock::new(json!({
+                "stat_data": {},
+                "initialized_lorebooks": {}
+            }))),
+            card_store: Arc::new(RwLock::new(CardStore::new(card, vec![]))),
+        };
+
+        let mind_block = "[Conclave Mind — primary NPC: Demo]\n- [knowledge/unspecified] User likes tea.\n(Do not mention this block unless character would know it.)";
+        let req = ChatRequest {
+            user_message: "hello".to_string(),
+            session_id: Some("1".to_string()),
+            client_mvu: Some(json!({ "stat_data": {} })),
+            injections: Some(vec![InjectionItem {
+                key: Some("mind.primary".into()),
+                content: mind_block.into(),
+                role: Some("system".into()),
+                position: Some("after_scenario".into()),
+                depth: Some(0.0),
+                ephemeral: Some(true),
+                source: Some("mind".into()),
+            }]),
+        };
+
+        let Json(resp) = chat_handler(State(app), Json(req)).await;
+        let debug = resp.prompt_debug.expect("prompt_debug required");
+        assert!(
+            debug.final_prompt.contains("Conclave Mind — primary NPC: Demo"),
+            "final_prompt must include Mind block"
+        );
+        assert!(debug.final_prompt.contains("User likes tea."));
+        assert_eq!(debug.injections.len(), 1);
+        assert_eq!(debug.injections[0].source.as_deref(), Some("mind"));
+        assert_eq!(debug.injections[0].content, mind_block);
+        // mock still echoes user message (injection path proven via prompt_debug only)
+        assert!(resp.raw_text.contains("hello"));
     }
 }
 

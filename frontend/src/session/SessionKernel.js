@@ -52,6 +52,11 @@ export const SESSION_PHASE_TRANSITIONS = {
  * @property {(requirements: object|null, runtime: import('./types.js').SessionRuntime) =>
  *   | { ok: boolean, report: object }
  *   | Promise<{ ok: boolean, report: object }>} [installCapabilities]
+ * @property {() => boolean} [isSending]
+ * @property {(sending: boolean) => void} [setSending]
+ * @property {(error: unknown) => void} [onSendError]
+ * @property {(raw: string, backendHint?: string) => string} [renderAssistantDisplay]
+ * @property {() => void} [onLeaveOpeningForChat]  // switch DOM from opening-only to full transcript
  */
 
 /**
@@ -61,6 +66,18 @@ export const SESSION_PHASE_TRANSITIONS = {
  * @property {() => import('./types.js').SessionRuntime} createRuntime
  * @property {SessionKernelHooks} hooks
  * @property {import('../bridge/ports.js').Lifecycle} [lifecycle]  // PR-05 ports lifecycle
+ * @property {import('../bridge/ports.js').Ports} [ports]  // PR-07 chat path
+ * @property {{
+ *   refresh?: (messageId: number) => unknown,
+ *   renderAll?: () => void,
+ * }} [messageMount]  // PR-07 DOM projection
+ * @property {(body: object) => Promise<{
+ *   raw_text?: string,
+ *   raw?: string,
+ *   new_state?: object,
+ *   rendered_html?: string,
+ *   prompt_debug?: object,
+ * }>} [chatApi]  // POST /api/chat
  */
 
 /**
@@ -98,7 +115,16 @@ function formatCapabilitiesSummary(caps) {
 /**
  * @param {CreateSessionKernelOptions} options
  */
-export function createSessionKernel({ store, shell, createRuntime, hooks, lifecycle }) {
+export function createSessionKernel({
+  store,
+  shell,
+  createRuntime,
+  hooks,
+  lifecycle,
+  ports,
+  messageMount,
+  chatApi,
+}) {
   if (!store) throw new Error('createSessionKernel: store is required');
   if (typeof createRuntime !== 'function') {
     throw new Error('createSessionKernel: createRuntime factory is required');
@@ -115,7 +141,15 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
     executeTavernHelperScripts,
     showError,
     installCapabilities,
+    isSending,
+    setSending,
+    onSendError,
+    renderAssistantDisplay,
+    onLeaveOpeningForChat,
   } = hooks || {};
+
+  /** @type {boolean} */
+  let sendingGuard = false;
 
   /**
    * @param {import('../bridge/ports.js').LifecycleEvent} event
@@ -377,6 +411,173 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
     return store.getRuntime();
   }
 
+  /**
+   * PR-07 chat sync: Session-first send path.
+   *
+   * Sequence (architecture §3.3):
+   *   1. transcript.append(user) FIRST
+   *   2. MessageMount update
+   *   3. lifecycle beforeGenerate
+   *   4. POST /api/chat {session_id, user_message, client_mvu, injections}
+   *   5. append assistant raw_text → replaceMvu(new_state) → MessageMount display
+   *   6. lifecycle afterGenerate
+   *
+   * Shell must NOT implement a parallel chat fetch.
+   *
+   * Failure policy (after user append, before/during network or lifecycle):
+   *   - User row remains in Session transcript (no rollback; Session-first is durable).
+   *   - MVU is unchanged.
+   *   - No assistant row is appended.
+   *   - Error is surfaced via hooks.onSendError (must not inject untracked DOM into
+   *     the message-area transcript root — use shell status outside MessageMount).
+   *   - Callers that retry will append another user line (intentional, not atomic).
+   *
+   * @param {string} text
+   * @returns {Promise<object|null>} ChatResponse or null if skipped
+   */
+  async function sendUserMessage(text) {
+    const message = String(text ?? '').trim();
+    if (!message) return null;
+
+    if (typeof isSending === 'function' ? isSending() : sendingGuard) {
+      return null;
+    }
+
+    if (!ports?.transcript) {
+      throw new Error('SessionKernel.sendUserMessage: ports.transcript is required');
+    }
+    if (typeof chatApi !== 'function') {
+      throw new Error('SessionKernel.sendUserMessage: chatApi is required');
+    }
+    if (!store.getRuntime()?.runtimeState?.messages) {
+      throw new Error('SessionKernel.sendUserMessage: runtime messages unavailable');
+    }
+
+    sendingGuard = true;
+    if (typeof setSending === 'function') setSending(true);
+
+    try {
+      // 1) Session-first: append user before any network I/O
+      const userEntry = ports.transcript.append({
+        role: 'user',
+        name: 'User',
+        message,
+      });
+
+      // Leave opening-only DOM and project full transcript when needed
+      if (typeof onLeaveOpeningForChat === 'function') {
+        onLeaveOpeningForChat();
+      } else if (messageMount && typeof messageMount.refresh === 'function') {
+        messageMount.refresh(userEntry.message_id);
+      }
+
+      // 2) Ensure user bubble is mounted (renderAll may already have done it)
+      if (messageMount && typeof messageMount.refresh === 'function') {
+        messageMount.refresh(userEntry.message_id);
+      }
+
+      // 3) lifecycle beforeGenerate (Mind may set injections here)
+      const injectionsBefore = ports.promptInjection?.list?.() || [];
+      await emitLifecycle('beforeGenerate', {
+        userMessage: message,
+        injections: injectionsBefore,
+      });
+
+      const injections = ports.promptInjection?.list?.() || [];
+      const clientMvu = ports.transcript.getMvu();
+      const sessionId =
+        typeof store.getSessionEpoch === 'function'
+          ? String(store.getSessionEpoch())
+          : undefined;
+
+      // 4) Network — sole chat fetch path
+      const data = await chatApi({
+        user_message: message,
+        session_id: sessionId,
+        client_mvu: clientMvu,
+        injections: injections.map(({ key, ...rest }) => ({
+          key,
+          ...rest,
+        })),
+      });
+
+      const raw = data?.raw_text ?? data?.raw ?? '';
+      // Only apply new_state when it is a plain object; never wipe MVU with {}.
+      const hasNewState =
+        data?.new_state != null &&
+        typeof data.new_state === 'object' &&
+        !Array.isArray(data.new_state);
+      const priorMvu = ports.transcript.getMvu();
+      const appliedMvu = hasNewState ? data.new_state : priorMvu;
+
+      if (!hasNewState) {
+        ports.diagnostics?.log?.('warn', 'chat.missing_new_state', {
+          note: 'preserving prior session mvu',
+        });
+      }
+
+      // 5a) append assistant raw_text (data carries applied MVU, not empty wipe)
+      const assistantEntry = ports.transcript.append({
+        role: 'assistant',
+        name: 'assistant',
+        message: String(raw),
+        data: appliedMvu,
+        swipes: [String(raw)],
+        rendered_swipes: [''],
+        swipes_data: [appliedMvu],
+        swipes_info: [{}],
+      });
+
+      // 5b) replaceMvu(new_state) only when server provided a valid object
+      if (hasNewState) {
+        ports.transcript.replaceMvu(data.new_state, 'chat.new_state');
+      }
+
+      // 5c) display pipeline → cache rendered_swipes → MessageMount for any messageId
+      const backendHint = data?.rendered_html || '';
+      const html =
+        typeof renderAssistantDisplay === 'function'
+          ? renderAssistantDisplay(String(raw), backendHint) || backendHint || String(raw)
+          : backendHint || String(raw);
+
+      ports.transcript.update(assistantEntry.message_id, {
+        rendered_swipes: [html],
+      });
+
+      if (messageMount && typeof messageMount.refresh === 'function') {
+        messageMount.refresh(assistantEntry.message_id);
+      }
+
+      // 6) afterGenerate
+      await emitLifecycle('afterGenerate', {
+        userMessage: message,
+        raw: String(raw),
+        renderedHtml: html,
+        promptDebug: data?.prompt_debug || null,
+        messageId: assistantEntry.message_id,
+        newState: hasNewState ? data.new_state : null,
+      });
+
+      return data;
+    } catch (error) {
+      // Re-project from Session so any transient DOM drift is cleared (rule 4).
+      if (messageMount && typeof messageMount.renderAll === 'function') {
+        try {
+          messageMount.renderAll();
+        } catch {
+          /* ignore mount errors during failure */
+        }
+      }
+      if (typeof onSendError === 'function') {
+        onSendError(error);
+      }
+      throw error;
+    } finally {
+      sendingGuard = false;
+      if (typeof setSending === 'function') setSending(false);
+    }
+  }
+
   return {
     loadFromInitResponse,
     teardown,
@@ -385,5 +586,6 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
     getStore: () => store,
     updateDiagnostics,
     transitionTo,
+    sendUserMessage,
   };
 }
