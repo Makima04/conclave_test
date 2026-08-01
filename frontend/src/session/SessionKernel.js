@@ -162,6 +162,70 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
   }
 
   /**
+   * Shared dispose order for teardown / fail (PR-08):
+   * abortScripts → clearPendingRefreshTimers → cleanupCardArtifacts →
+   * registry/adapter → eventBus → clearRuntime → onTeardown
+   *
+   * @param {import('./types.js').SessionRuntime|null|undefined} runtime
+   * @param {{ soft?: boolean }} [opts]  soft=true logs instead of swallowing
+   */
+  function disposeSessionResources(runtime, opts = {}) {
+    const soft = !!opts.soft;
+
+    if (typeof abortScripts === 'function') {
+      try {
+        abortScripts();
+      } catch (error) {
+        if (soft) console.warn('[SessionKernel] abortScripts error:', error);
+      }
+    }
+
+    if (typeof clearPendingRefreshTimers === 'function') {
+      try {
+        clearPendingRefreshTimers();
+      } catch (error) {
+        if (soft) console.warn('[SessionKernel] clearPendingRefreshTimers error:', error);
+      }
+    }
+
+    if (typeof cleanupCardArtifacts === 'function') {
+      try {
+        cleanupCardArtifacts();
+      } catch (error) {
+        if (soft) console.warn('[SessionKernel] cleanupCardArtifacts error:', error);
+      }
+    }
+
+    try {
+      if (runtime?.capabilityRegistry && typeof runtime.capabilityRegistry.teardown === 'function') {
+        void runtime.capabilityRegistry.teardown();
+      } else if (runtime?.adapter && typeof runtime.adapter.teardown === 'function') {
+        runtime.adapter.teardown();
+      }
+    } catch (error) {
+      if (soft) console.warn('[SessionKernel] capability teardown error:', error);
+    }
+
+    try {
+      runtime?.eventBus?.clear?.();
+    } catch {
+      /* ignore */
+    }
+
+    store.clearRuntime();
+    if (typeof store.setCapabilities === 'function') {
+      store.setCapabilities(null);
+    }
+    if (typeof onTeardown === 'function') {
+      try {
+        onTeardown();
+      } catch (error) {
+        if (soft) console.warn('[SessionKernel] onTeardown error:', error);
+      }
+    }
+  }
+
+  /**
    * Tear down the current session: timers, artifacts, capability globals, runtime null.
    * Phase becomes `tearing_down`, then optionally `idle`.
    *
@@ -187,47 +251,7 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
       toIdle,
     });
 
-    // PR-08: cancel pending ScriptRunner work first so async TH imports stop ASAP.
-    if (typeof abortScripts === 'function') {
-      try {
-        abortScripts();
-      } catch (error) {
-        console.warn('[SessionKernel] abortScripts error:', error);
-      }
-    }
-
-    if (typeof clearPendingRefreshTimers === 'function') {
-      clearPendingRefreshTimers();
-    }
-    if (typeof cleanupCardArtifacts === 'function') {
-      cleanupCardArtifacts();
-    }
-
-    // Uninstall session globals via registry/adapter before dropping runtime.
-    try {
-      if (runtime?.capabilityRegistry && typeof runtime.capabilityRegistry.teardown === 'function') {
-        void runtime.capabilityRegistry.teardown();
-      } else if (runtime?.adapter && typeof runtime.adapter.teardown === 'function') {
-        runtime.adapter.teardown();
-      }
-    } catch (error) {
-      console.warn('[SessionKernel] capability teardown error:', error);
-    }
-
-    // Clear TH EventBus listeners if present.
-    try {
-      runtime?.eventBus?.clear?.();
-    } catch {
-      /* ignore */
-    }
-
-    store.clearRuntime();
-    if (typeof store.setCapabilities === 'function') {
-      store.setCapabilities(null);
-    }
-    if (typeof onTeardown === 'function') {
-      onTeardown();
-    }
+    disposeSessionResources(runtime, { soft: true });
 
     if (toIdle) {
       transitionTo('idle');
@@ -235,7 +259,7 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
   }
 
   /**
-   * Fail the session: set lastError, clear runtime, phase → error.
+   * Fail the session: set lastError, dispose resources (same order as teardown), phase → error.
    * @param {unknown} error
    * @param {{ showUi?: boolean }} [options]
    */
@@ -244,42 +268,7 @@ export function createSessionKernel({ store, shell, createRuntime, hooks, lifecy
     const message = error instanceof Error ? error.message : String(error);
     store.setLastError(message);
     const runtime = store.getRuntime();
-    if (typeof abortScripts === 'function') {
-      try {
-        abortScripts();
-      } catch {
-        /* ignore */
-      }
-    }
-    if (typeof cleanupCardArtifacts === 'function') {
-      try {
-        cleanupCardArtifacts();
-      } catch {
-        /* ignore */
-      }
-    }
-    try {
-      if (runtime?.capabilityRegistry && typeof runtime.capabilityRegistry.teardown === 'function') {
-        void runtime.capabilityRegistry.teardown();
-      } else if (runtime?.adapter && typeof runtime.adapter.teardown === 'function') {
-        runtime.adapter.teardown();
-      }
-    } catch {
-      /* ignore */
-    }
-    try {
-      runtime?.eventBus?.clear?.();
-    } catch {
-      /* ignore */
-    }
-    store.clearRuntime();
-    if (typeof onTeardown === 'function') {
-      try {
-        onTeardown();
-      } catch {
-        /* ignore */
-      }
-    }
+    disposeSessionResources(runtime, { soft: false });
     transitionTo('error');
     if (showUi && typeof showError === 'function') {
       showError(message);

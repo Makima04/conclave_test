@@ -7,9 +7,29 @@
  * @module st-host/ScriptRunner
  */
 
-const REMOTE_STATIC_IMPORT_RE =
-  /(?:^|[\n;])\s*import\s+(?:[^'"\n]+?\s+from\s+)?['"]https?:\/\//im;
-const REMOTE_DYNAMIC_IMPORT_RE = /import\s*\(\s*['"]https?:\/\//i;
+/**
+ * Remote module URL detector (default-deny for same-window TH / card scripts).
+ * Multiline-safe: `from 'https://…'`, protocol-relative `//cdn…`, dynamic import(),
+ * and side-effect / export-from forms. Does not require a single-line `import … from`.
+ */
+const REMOTE_MODULE_URL_RE = /(?:https?:)?\/\//i;
+/** `from 'https://…'` / `from '//…'` — covers multi-line named imports and `export … from`. */
+const REMOTE_FROM_RE = /\bfrom\s*['"](?:https?:)?\/\//i;
+/** Side-effect `import 'https://…'` / `import '//…'`. */
+const REMOTE_BARE_IMPORT_RE = /(?:^|[\n;])\s*import\s*['"](?:https?:)?\/\//im;
+/** Dynamic `import('https://…')` / `import('//…')`. */
+const REMOTE_DYNAMIC_IMPORT_RE = /import\s*\(\s*['"](?:https?:)?\/\//i;
+
+/**
+ * True when a script src / import specifier is a remote http(s) or protocol-relative URL.
+ * @param {string} [spec]
+ * @returns {boolean}
+ */
+export function isRemoteScriptUrl(spec) {
+  const s = String(spec || '').trim();
+  if (!s) return false;
+  return /^(?:https?:)?\/\//i.test(s);
+}
 
 /**
  * Build scoped storage namespace for a session + card import id.
@@ -31,19 +51,26 @@ export function buildStorageNamespace(parts = {}) {
 }
 
 /**
- * Detect remote http(s) module imports in script content or pre-parsed import list.
+ * Detect remote http(s) / protocol-relative module imports in script content
+ * or a pre-parsed import specifier list (backend `imports[]`).
  *
  * @param {string} [content]
  * @param {string[]} [imports]
  * @returns {boolean}
  */
 export function hasRemoteHttpImport(content = '', imports = []) {
-  if (Array.isArray(imports) && imports.some(entry => /^https?:\/\//i.test(String(entry || '')))) {
+  if (Array.isArray(imports) && imports.some(entry => isRemoteScriptUrl(entry))) {
     return true;
   }
   const text = String(content || '');
   if (!text) return false;
-  return REMOTE_STATIC_IMPORT_RE.test(text) || REMOTE_DYNAMIC_IMPORT_RE.test(text);
+  // Cheap filter: no URL-looking token at all.
+  if (!REMOTE_MODULE_URL_RE.test(text)) return false;
+  return (
+    REMOTE_FROM_RE.test(text) ||
+    REMOTE_BARE_IMPORT_RE.test(text) ||
+    REMOTE_DYNAMIC_IMPORT_RE.test(text)
+  );
 }
 
 /**
@@ -321,16 +348,34 @@ export function createScriptRunner(options = {}) {
 
   /**
    * Abort pending work and remove all script-owned artifacts.
-   * Idempotent: second call is a no-op / no-throw.
+   * Safe to call repeatedly (no-throw). Each call re-aborts / re-bumps run ids
+   * and re-runs cleanup — not a pure no-op, but always safe.
+   *
+   * Same-window limit: an already-evaluating `import()` body cannot be hard-killed;
+   * late DOM mutations after observer disconnect may need the next card's cleanup
+   * or PR-09 iframe isolation. Optional microtask re-sweep helps catch stragglers.
    */
   function teardown() {
     abort();
     cleanupArtifacts();
     tornDown = true;
+    // Soft mitigation: re-sweep once after abort in case an in-flight module
+    // appended nodes between abort and observer disconnect.
+    if (typeof queueMicrotask === 'function') {
+      queueMicrotask(() => {
+        try {
+          cleanupArtifacts();
+        } catch {
+          /* ignore */
+        }
+      });
+    }
   }
 
   /**
-   * Whether the runner is currently torn down (after teardown, before next run).
+   * True after `teardown()` until the next beginTavernHelperRun / beginInlineRun /
+   * beginCardArtifactTracking. Production main.js often uses abort+cleanupArtifacts
+   * separately (without setting this flag).
    * @returns {boolean}
    */
   function isTornDown() {
@@ -414,11 +459,21 @@ export function createScriptRunner(options = {}) {
       String(script?.content || '').trim(),
     );
 
-    const { runId, signal } = beginTavernHelperRun();
-
+    // Empty list: invalidate prior TH work without allocating a live controller.
     if (!list.length) {
+      if (activeController) {
+        try {
+          activeController.abort();
+        } catch {
+          /* ignore */
+        }
+        activeController = null;
+      }
+      tavernHelperRunId += 1;
       return;
     }
+
+    const { runId, signal } = beginTavernHelperRun();
 
     if (typeof opts.ensureRuntime === 'function') {
       opts.ensureRuntime();
@@ -464,6 +519,11 @@ export function createScriptRunner(options = {}) {
   /**
    * Inject inline / external card HTML scripts into the document body.
    *
+   * Remote policy (same feature flag as TH module imports):
+   * - Inline *content* with remote `import` / `from 'https://…'` → skipped by default
+   * - Classic `<script src="https://…">` / protocol-relative src → also skipped by default
+   *   (jquery src still skipped via skipSrcPattern regardless of flag)
+   *
    * @param {Array<{ src?: string, type?: string, content?: string }>} scripts
    * @param {{ namespace?: string, skipSrcPattern?: RegExp }} [opts]
    */
@@ -475,14 +535,25 @@ export function createScriptRunner(options = {}) {
     const skipSrc =
       opts.skipSrcPattern instanceof RegExp ? opts.skipSrcPattern : /jquery/i;
     const list = Array.isArray(scripts) ? scripts : [];
+    const allowRemote = resolveAllowRemote();
 
     list.forEach(scriptPart => {
       if (runId !== scriptRunId) return;
       if (scriptPart.src && skipSrc.test(scriptPart.src)) return;
+
+      // Classic external script tags: same default-deny as module imports.
+      if (scriptPart.src && isRemoteScriptUrl(scriptPart.src) && !allowRemote) {
+        warn(
+          '[ScriptRunner] skipped remote script src (set conclave:feature:allow_remote_th_imports=1 to override):',
+          scriptPart.src,
+        );
+        return;
+      }
+
       if (
         !scriptPart.src &&
         hasRemoteHttpImport(scriptPart.content) &&
-        !resolveAllowRemote()
+        !allowRemote
       ) {
         warn(
           '[ScriptRunner] skipped inline script with remote http(s) import',

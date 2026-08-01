@@ -209,6 +209,17 @@ function beginCardArtifactTracking() {
 
 /**
  * Session-scoped storage namespace for card scripts.
+ *
+ * Shape: `conclave:session:{sessionEpoch}:card:{importId}:`
+ *
+ * Tradeoff (intentional for PR-08 isolation): backend bumps `session_epoch` on every
+ * import/select, so A→B→A gets a new epoch and a fresh scoped key space even for the
+ * same import id. That strengthens cross-card isolation (no stale keys leaking across
+ * card switches) but means card scripts that persisted state in scoped localStorage
+ * will not see prior values after leave/return in the same browser session.
+ * If product later needs re-select restore, key by stable importId only (or clear
+ * old namespaces on teardown instead of rotating sessionId).
+ *
  * @returns {string}
  */
 function currentCardStorageNamespace() {
@@ -1178,6 +1189,8 @@ async function executeTavernHelperScripts() {
     getRuntime: () => store.getRuntime(),
     onComplete: async (liveRuntime, runId) => {
       if (!liveRuntime) return;
+      // Defense-in-depth across the async eventEmit boundary: ScriptRunner already
+      // gates before calling onComplete, but a card switch may abort mid-emit.
       if (runId !== scriptRunner.getTavernHelperRunId()) return;
       const data = clone(liveRuntime.runtimeState.mvuData || {});
       await liveRuntime.eventEmit?.(

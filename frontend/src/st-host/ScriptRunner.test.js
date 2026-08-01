@@ -3,6 +3,7 @@ import {
   createScriptRunner,
   buildStorageNamespace,
   hasRemoteHttpImport,
+  isRemoteScriptUrl,
   isRemoteThImportAllowed,
 } from './ScriptRunner.js'
 
@@ -15,6 +16,16 @@ describe('buildStorageNamespace', () => {
   })
 })
 
+describe('isRemoteScriptUrl', () => {
+  it('matches http(s) and protocol-relative URLs', () => {
+    expect(isRemoteScriptUrl('https://cdn.example/a.js')).toBe(true)
+    expect(isRemoteScriptUrl('http://cdn.example/a.js')).toBe(true)
+    expect(isRemoteScriptUrl('//cdn.example/a.js')).toBe(true)
+    expect(isRemoteScriptUrl('./local.js')).toBe(false)
+    expect(isRemoteScriptUrl('/absolute/path.js')).toBe(false)
+  })
+})
+
 describe('hasRemoteHttpImport', () => {
   it('detects static and dynamic remote imports', () => {
     expect(hasRemoteHttpImport("import x from 'https://evil.example/m.js'")).toBe(true)
@@ -22,6 +33,17 @@ describe('hasRemoteHttpImport', () => {
     expect(hasRemoteHttpImport("import './local.js'")).toBe(false)
     expect(hasRemoteHttpImport('', ['https://cdn.example/a.js'])).toBe(true)
     expect(hasRemoteHttpImport('', ['./local.js'])).toBe(false)
+  })
+
+  it('detects multi-line named imports and export-from / protocol-relative', () => {
+    const multiline = `import {\n  foo,\n  bar\n} from 'https://evil.example/m.js'`
+    expect(hasRemoteHttpImport(multiline)).toBe(true)
+    expect(
+      hasRemoteHttpImport("export { x } from 'https://evil.example/m.js'"),
+    ).toBe(true)
+    expect(hasRemoteHttpImport("import x from '//cdn.example/m.js'")).toBe(true)
+    expect(hasRemoteHttpImport("await import('//cdn.example/m.js')")).toBe(true)
+    expect(hasRemoteHttpImport('', ['//cdn.example/a.js'])).toBe(true)
   })
 })
 
@@ -143,45 +165,60 @@ describe('createScriptRunner', () => {
   })
 
   it('aborts multi-run TH work so only the latest generation completes', async () => {
-    const importOrder = []
     let resolveFirst
     const firstGate = new Promise((resolve) => {
       resolveFirst = resolve
     })
-
+    let urlSeq = 0
+    const createObjectURL = vi.fn(() => {
+      urlSeq += 1
+      return `blob:test-${urlSeq}`
+    })
     const importModule = vi.fn(async (url) => {
-      importOrder.push(url)
-      if (importOrder.length === 1) {
+      // First import (run A / slow) blocks until a second run aborts it.
+      if (url === 'blob:test-1') {
         await firstGate
       }
     })
 
     const runner = createScriptRunner({
       importModule,
-      createObjectURL: (blob) => `blob:test-${importOrder.length + 1}-${blob?.type || 'x'}`,
+      createObjectURL,
       revokeObjectURL: vi.fn(),
       warn,
       allowRemoteImports: false,
     })
 
-    const runA = runner.runTavernHelper([
-      { name: 'slow', content: 'export const a = 1' },
-      { name: 'after-slow', content: 'export const b = 2' },
-    ])
+    const onCompleteA = vi.fn()
+    const onCompleteB = vi.fn()
+
+    const runA = runner.runTavernHelper(
+      [
+        { name: 'slow', content: 'export const a = 1' },
+        { name: 'after-slow', content: 'export const b = 2' },
+      ],
+      { onComplete: onCompleteA },
+    )
 
     // Mid-flight abort via a second run (card switch simulation).
     await Promise.resolve()
-    const runB = runner.runTavernHelper([{ name: 'fast', content: 'export const c = 3' }])
+    const runB = runner.runTavernHelper(
+      [{ name: 'fast', content: 'export const c = 3' }],
+      { onComplete: onCompleteB },
+    )
 
     resolveFirst()
     await Promise.all([runA, runB])
 
-    // First script of run A may have started; subsequent A scripts must not run after abort.
-    // Run B must complete.
-    expect(importModule).toHaveBeenCalled()
-    const labelsViaUrls = importModule.mock.calls.length
-    expect(labelsViaUrls).toBeGreaterThanOrEqual(1)
-    // After runB, generation is B's — abort invalidated A.
+    // slow started (blob:1); after-slow must not create a blob; fast is blob:2.
+    expect(createObjectURL).toHaveBeenCalledTimes(2)
+    expect(importModule).toHaveBeenCalledTimes(2)
+    expect(importModule.mock.calls.map((c) => c[0])).toEqual([
+      'blob:test-1',
+      'blob:test-2',
+    ])
+    expect(onCompleteA).not.toHaveBeenCalled()
+    expect(onCompleteB).toHaveBeenCalledTimes(1)
     expect(runner.getTavernHelperRunId()).toBeGreaterThanOrEqual(2)
   })
 
@@ -264,6 +301,54 @@ describe('createScriptRunner', () => {
 
     expect(importModule).not.toHaveBeenCalled()
     expect(warn).toHaveBeenCalled()
+  })
+
+  it('skips multi-line remote from and remote script src by default', async () => {
+    const importModule = vi.fn(async () => ({}))
+    const doc = createMockDocument()
+    const runner = createScriptRunner({
+      document: doc,
+      importModule,
+      createObjectURL: () => 'blob:ml',
+      revokeObjectURL: vi.fn(),
+      allowRemoteImports: false,
+      warn,
+    })
+
+    await runner.runTavernHelper([
+      {
+        name: 'ml',
+        content: "import {\n  x\n} from 'https://cdn.example.com/evil.js'\nexport default 1",
+      },
+    ])
+    expect(importModule).not.toHaveBeenCalled()
+
+    const before = doc._bodyChildren.length
+    runner.runInlineHtmlScripts([{ src: 'https://cdn.example.com/widget.js' }])
+    expect(doc._bodyChildren.length).toBe(before)
+    expect(warn).toHaveBeenCalled()
+  })
+
+  it('empty TH list invalidates prior run without leaving a live signal', async () => {
+    let release
+    const gate = new Promise((r) => {
+      release = r
+    })
+    const importModule = vi.fn(async () => {
+      await gate
+    })
+    const runner = createScriptRunner({
+      importModule,
+      createObjectURL: () => 'blob:empty',
+      revokeObjectURL: vi.fn(),
+      warn,
+    })
+    const pending = runner.runTavernHelper([{ content: 'export default 1' }])
+    expect(runner.getSignal()).not.toBeNull()
+    await runner.runTavernHelper([])
+    expect(runner.getSignal()).toBeNull()
+    release()
+    await pending
   })
 
   it('executes remote imports when allowRemoteImports is true', async () => {
