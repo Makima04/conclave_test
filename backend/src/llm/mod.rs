@@ -11,8 +11,15 @@
 //! - `CONCLAVE_LLM_MODEL` — model id (default `gpt-4o-mini`)
 
 use serde_json::json;
+use std::time::Duration;
+
+/// Overall HTTP timeout for real LLM calls (connect + response body).
+pub const LLM_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Connect timeout so hung TCP does not wait the full request budget alone.
+pub const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Errors from LLM completion (network / HTTP / parse).
+/// Detail strings may be logged server-side (after scrub); never return them verbatim to clients.
 #[derive(Debug)]
 pub struct LlmError(pub String);
 
@@ -25,18 +32,37 @@ impl std::fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 /// Active LLM backend. Clone is cheap (config only; HTTP client is per-request).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum LlmProvider {
     Mock,
     OpenAiCompatible(OpenAiCompatibleConfig),
 }
 
+impl std::fmt::Debug for LlmProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mock => write!(f, "Mock"),
+            Self::OpenAiCompatible(cfg) => f.debug_tuple("OpenAiCompatible").field(cfg).finish(),
+        }
+    }
+}
+
 /// OpenAI Chat Completions compatible endpoint config.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+}
+
+impl std::fmt::Debug for OpenAiCompatibleConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatibleConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"***")
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 impl LlmProvider {
@@ -147,7 +173,12 @@ impl OpenAiCompatibleConfig {
         user_message: &str,
     ) -> Result<String, LlmError> {
         let url = chat_completions_url(&self.base_url);
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(LLM_HTTP_TIMEOUT)
+            .connect_timeout(LLM_CONNECT_TIMEOUT)
+            .build()
+            .map_err(|error| LlmError(format!("LLM client build failed: {error}")))?;
+
         let body = json!({
             "model": self.model,
             "messages": [
@@ -173,16 +204,17 @@ impl OpenAiCompatibleConfig {
             .map_err(|error| LlmError(format!("LLM response body read failed: {error}")))?;
 
         if !status.is_success() {
+            // Scrub before storing: upstream bodies may echo partial API keys.
             return Err(LlmError(format!(
                 "LLM HTTP {status}: {}",
-                truncate_for_error(&text, 500)
+                scrub_secrets(&truncate_for_error(&text, 500))
             )));
         }
 
         let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
             LlmError(format!(
                 "LLM response is not JSON: {error}; body={}",
-                truncate_for_error(&text, 300)
+                scrub_secrets(&truncate_for_error(&text, 300))
             ))
         })?;
 
@@ -194,7 +226,7 @@ impl OpenAiCompatibleConfig {
             .ok_or_else(|| {
                 LlmError(format!(
                     "LLM response missing choices[0].message.content: {}",
-                    truncate_for_error(&text, 400)
+                    scrub_secrets(&truncate_for_error(&text, 400))
                 ))
             })
     }
@@ -219,6 +251,31 @@ fn truncate_for_error(value: &str, max: usize) -> String {
         let truncated: String = value.chars().take(max).collect();
         format!("{truncated}…")
     }
+}
+
+/// Redact common secret patterns from upstream error text before logging.
+pub fn scrub_secrets(value: &str) -> String {
+    let mut out = value.to_string();
+
+    // OpenAI-style keys: sk-... / sk-proj-...
+    if let Ok(re) = regex::Regex::new(r"sk-[A-Za-z0-9_\-]{6,}") {
+        out = re.replace_all(&out, "sk-***").into_owned();
+    }
+    // Bearer tokens in headers/messages
+    if let Ok(re) = regex::Regex::new(r"(?i)(Bearer\s+)\S+") {
+        out = re.replace_all(&out, "${1}***").into_owned();
+    }
+    // api_key / authorization field-ish fragments
+    if let Ok(re) = regex::Regex::new(r#"(?i)((?:api[_-]?key|authorization)\s*[:=]\s*["']?)[^\s"',}]+"#) {
+        out = re.replace_all(&out, "${1}***").into_owned();
+    }
+
+    out
+}
+
+/// Generic 502 body for clients (no upstream text / secrets).
+pub fn client_error_message(provider_name: &str) -> String {
+    format!("LLM provider error ({provider_name})")
 }
 
 #[cfg(test)]
@@ -330,6 +387,46 @@ mod tests {
             chat_completions_url("http://localhost:11434/v1/"),
             "http://localhost:11434/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let cfg = OpenAiCompatibleConfig {
+            base_url: "https://api.openai.com".into(),
+            api_key: "sk-super-secret-value-do-not-leak".into(),
+            model: "gpt-4o-mini".into(),
+        };
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains("sk-super-secret"),
+            "Debug must not leak api_key: {debug}"
+        );
+        assert!(debug.contains("***"), "expected redacted marker: {debug}");
+        assert!(debug.contains("https://api.openai.com"));
+        assert!(debug.contains("gpt-4o-mini"));
+
+        let provider = LlmProvider::OpenAiCompatible(cfg);
+        let debug_p = format!("{provider:?}");
+        assert!(!debug_p.contains("sk-super-secret"), "{debug_p}");
+        assert!(debug_p.contains("***"), "{debug_p}");
+    }
+
+    #[test]
+    fn scrub_secrets_redacts_sk_and_bearer() {
+        let raw = r#"Incorrect API key provided: sk-abc1234567890xyz. Bearer tok_should_go. api_key=secretvalue"#;
+        let scrubbed = scrub_secrets(raw);
+        assert!(!scrubbed.contains("sk-abc1234567890xyz"), "{scrubbed}");
+        assert!(scrubbed.contains("sk-***"), "{scrubbed}");
+        assert!(!scrubbed.contains("tok_should_go"), "{scrubbed}");
+        assert!(!scrubbed.contains("secretvalue"), "{scrubbed}");
+    }
+
+    #[test]
+    fn client_error_message_is_generic() {
+        let msg = client_error_message("openai");
+        assert_eq!(msg, "LLM provider error (openai)");
+        assert!(!msg.contains("HTTP"));
+        assert!(!msg.contains("sk-"));
     }
 
     #[tokio::test]

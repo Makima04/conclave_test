@@ -337,46 +337,61 @@ async fn chat_handler(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (axum::http::StatusCode, String)> {
-    let mut game_state = state.game_state.write().await;
     let card = {
         let store = state.card_store.read().await;
         store.current_card().clone()
     };
 
-    // PR-07: client_mvu is the FE Session base; fall back to server projection when absent.
-    apply_client_mvu_base(&mut game_state, req.client_mvu);
     // session_id accepted for future multi-session routing (unused in single-session MVP).
     let _session_id = req.session_id.as_deref();
     let _ = _session_id;
-
     let injections = req.injections.unwrap_or_default();
 
-    // 1. 组装 Prompt（通用 WI 摘要 + state dump）
-    let base_prompt = lorebook::compile_prompt(
-        &serde_json::to_value(&card).unwrap_or_default(),
-        &game_state,
-        None,
-    );
+    // 1. Short critical section: clone state + build prompts, then drop all locks
+    //    before any LLM await (real HTTP must not hold game_state write).
+    let (base_prompt, final_prompt, mut working_state) = {
+        let game_state = state.game_state.read().await;
+        // PR-07: client_mvu is the FE Session base; fall back to server projection when absent.
+        let mut working = game_state.clone();
+        apply_client_mvu_base(&mut working, req.client_mvu);
 
-    // PR-11: apply injections[] with position/depth semantics → final_prompt.
-    // Mock LLM may still echo user_message; prompt_debug proves the injection path.
-    let final_prompt = apply_prompt_injections(&base_prompt, &injections);
+        let base_prompt = lorebook::compile_prompt(
+            &serde_json::to_value(&card).unwrap_or_default(),
+            &working,
+            None,
+        );
+        // PR-11: apply injections[] with position/depth semantics → final_prompt.
+        let final_prompt = apply_prompt_injections(&base_prompt, &injections);
+        (base_prompt, final_prompt, working)
+    }; // read lock released
 
     // 2. LLM provider (mock default; real when CONCLAVE_LLM_* set — PR-13).
     // Mock echoes `user_message`; real provider uses final_prompt as system content.
+    // No game_state lock held across this await.
     let llm_raw_response = state
         .llm
         .complete(&final_prompt, &req.user_message)
         .await
         .map_err(|error| {
+            // Server-side detail only (already scrubbed of sk-/Bearer fragments in provider).
+            eprintln!(
+                "! LLM provider error ({}): {}",
+                state.llm.name(),
+                llm::scrub_secrets(&error.to_string())
+            );
+            // Generic 502 body — never forward upstream text (may contain partial keys).
             (
                 axum::http::StatusCode::BAD_GATEWAY,
-                format!("LLM provider error ({}): {error}", state.llm.name()),
+                llm::client_error_message(state.llm.name()),
             )
         })?;
 
-    // 3. 提取并应用 MVU 变量更新 (on client_mvu base)
-    pipeline::mvu_patch::apply_mvu_patch(&mut game_state, &llm_raw_response);
+    // 3. Apply MVU patch on the turn-local base, then publish as server projection.
+    pipeline::mvu_patch::apply_mvu_patch(&mut working_state, &llm_raw_response);
+    {
+        let mut game_state = state.game_state.write().await;
+        *game_state = working_state.clone();
+    }
 
     // 4. 执行正则管线 (hint only after FE display authority; still returned for debug/fallback)
     let scripts = card.regex_scripts();
@@ -385,7 +400,7 @@ async fn chat_handler(
     Ok(Json(ChatResponse {
         raw_text: llm_raw_response,
         rendered_html,
-        new_state: game_state.clone(),
+        new_state: working_state,
         prompt_debug: Some(PromptDebug {
             base_prompt,
             final_prompt,
