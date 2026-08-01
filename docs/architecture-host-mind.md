@@ -6,8 +6,8 @@
 | **作者** | Conclave Architecture（设计稿） |
 | **P0 DRI** | 开工时在 PR-01a 指定单一负责人；未指定前不得并行改 `main.js` 与后端初始状态 |
 | **日期** | 2026-08-01 |
-| **修订** | 2026-08-01 r4 — 记录 PR-07～PR-12 落地状态（见 §PR Plan / Implementation Log） |
-| **状态** | In progress — P0 主体已落地；P1 中（PR-07 chat 同步完成）；P3 Mind MVP+调参（PR-11/12）完成 |
+| **修订** | 2026-08-01 r5 — PR-13 真 LLM provider 切换 + E2E smoke（见 §PR Plan / Implementation Log） |
+| **状态** | In progress — P0–P3 主体已落地；P4 起：mock/real LLM 可切 + G1 API smoke |
 | **项目路径** | `/Users/makima/program/Conclave` |
 | **ST 参考源码** | `/Users/makima/program/SillyTavern-release` |
 | **取代方向** | `docs/st-api-compat-plan.md` / `docs/st-api-compat-log.md`（历史补丁日志保留；架构方向以本文为准） |
@@ -1385,7 +1385,7 @@ fn initial_game_state(card: &CardData) -> Value {
 | **P1** | FE test harness + Display RenderPipeline + MessageMount + chat 同步 | vitest golden；StatusPlaceHolder 预通道；N 轮后 TH/DOM/Session 一致 | **主体完成**：05.5+06+07；MessageMount 列表路径已接 Kernel |
 | **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | **完成**：PR-08/09/10 ✅（iframe flag 默认 off） |
 | **P3** | Mind MVP | mock 下 `prompt_debug`+面板含 Mind 块；flag off 无回归 | **完成**（PR-11 MVP + PR-12 调参/文档；默认 flag off） |
-| **P4** | 真 LLM / 多会话 / 任意扩展 / E2E | 真模型；E2E 卡集 | 未开始 |
+| **P4** | 真 LLM / 多会话 / 任意扩展 / E2E | 真模型；E2E 卡集 | **部分**：PR-13 provider 切换 + mock E2E smoke；多会话/卡集未做 |
 
 ### 回滚
 
@@ -1409,8 +1409,8 @@ fn initial_game_state(card: &CardData) -> Value {
 
 ### Implementation Log（已实现汇总）
 
-> 本地 monorepo 以 **git commit 栈**落地（未必拆成远端 PR）；下表为 **r5** 事实进度（G1 iframe 栈 PR-07..10 与 G2 Mind 栈 PR-11..12 已合并到本工作区基线）。  
-> 命令基线以合入后 `npm test && npm run lint && npm run build && cargo test` 为准。
+> 本地 monorepo 以 **git commit 栈**落地（未必拆成远端 PR）；下表为 **r5** 事实进度（G1 iframe 栈 PR-07..10 与 G2 Mind 栈 PR-11..12 已合并；**PR-13** mock/real LLM + smoke）。  
+> 命令基线以合入后 `npm test && npm run lint && npm run build && cargo test` 为准；可选 `./scripts/e2e-smoke.sh`。
 
 | 项 | 状态 | 代表 commit / 说明 |
 |----|------|-------------------|
@@ -1431,7 +1431,7 @@ fn initial_game_state(card: &CardData) -> Value {
 | PR-10 getContext P2 + ExtensionManager | ✅ | ContextFactory P2 + ExtensionManager skeleton |
 | **PR-11** Mind MVP（flag 默认 off） | ✅ | `frontend/src/mind/*` RuleExtractor/store/cleanup/retrieve/compose + Debug panel |
 | **PR-12** Mind 调参 + 文档 | ✅ | 抽取调参；cleanup 硬上限；50-turn cap 单测 |
-| PR-13 真 LLM + E2E | 🔲 | 下一步（合并 G1+G2 栈后） |
+| **PR-13** 真 LLM + E2E | ✅ | `backend/src/llm` mock/openai；`scripts/e2e-smoke.sh`；默认 mock |
 
 **落地偏差（已知，不阻塞后续 PR）：**
 
@@ -1452,9 +1452,8 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 （PR-03 后端中性化 ∥ PR-02；PR-03-fe 默认剥离依赖 PR-02）
 （PR-05.5 test harness 在 PR-06 之前，可与 PR-05 并行）
 
-已完成(本栈):  01a 01b 01c 02 03 03-fe 04 05 05.5 06 07 11 12
-下一步(G1):    08 → 09 → 10
-下一步(G2/P4): 13（真 LLM / E2E；可选 persistence）
+已完成(本栈):  01a 01b 01c 02 03 03-fe 04 05 05.5 06 07 08 09 10 11 12 13
+后续可选:      多会话 / Mind persistence / 浏览器 E2E 卡集
 ```
 
 ### PR-01a — 纯机械搬迁（无新抽象） · ✅
@@ -1585,10 +1584,32 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 5. **文档**  
    - 本文 Implementation Log / 阶段表 / PR-07…12 条目更新为 r4
 
-### PR-13 — 真 LLM + E2E 烟测（P4 起） · 🔲
-**依赖：** PR-11, PR-10  
-**描述：** provider；CI e2e。  
-**验收：** mock/real 可切；G1 回归绿。
+### PR-13 — 真 LLM + E2E 烟测（P4 起） · ✅
+**依赖：** PR-11, PR-10（本分支基线为 PR-10 + PR-12 合并栈）  
+**描述：** LLM provider 抽象；mock 默认；OpenAI-compatible 可选；G1 API smoke。  
+**验收：** mock/real 可切；G1 回归绿。  
+
+**落地说明：**
+
+1. **Provider 模块** `backend/src/llm/mod.rs`
+   - `LlmProvider::Mock` — 现有回声模板（`【沈慕微】` + user_message）
+   - `LlmProvider::OpenAiCompatible` — `POST {base}/v1/chat/completions`（reqwest）
+   - `select_provider` / `from_env` 纯选择逻辑 + 单测
+2. **`chat_handler`** 经 `state.llm.complete(final_prompt, user_message)`；失败 → HTTP 502  
+3. **环境变量（默认 mock，CI/dev 无变化）**
+
+| 变量 | 说明 |
+|------|------|
+| `CONCLAVE_LLM_PROVIDER` | `mock` 强制 mock；`openai` 仅在 URL+KEY 齐全时生效 |
+| `CONCLAVE_LLM_BASE_URL` | 如 `https://api.openai.com` 或 `http://localhost:11434/v1` |
+| `CONCLAVE_LLM_API_KEY` | Bearer token（本地可填任意非空，如 `ollama`） |
+| `CONCLAVE_LLM_MODEL` | 默认 `gpt-4o-mini` |
+| `CONCLAVE_BIND` | 监听地址，默认 `0.0.0.0:3000`（e2e 用 `127.0.0.1:<port>`） |
+
+4. **E2E smoke**
+   - 单测：`g1_init_and_mock_chat_smoke` + `llm` 模块 provider 选择单测
+   - 脚本：`scripts/e2e-smoke.sh` — 启动 mock 后端，curl `/api/init` + `/api/chat`
+5. **未做（有意缩小范围）**：浏览器 E2E、多会话路由、Mind 持久化、真实 LLM CI 密钥
 
 ### P0 / P1 出口核对（对应阶段表）
 

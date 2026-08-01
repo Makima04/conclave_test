@@ -16,6 +16,7 @@ use std::{
 use tokio::sync::RwLock;
 
 mod card_loader;
+mod llm;
 mod lorebook;
 mod pipeline;
 mod st_api_scanner;
@@ -24,6 +25,8 @@ mod st_api_scanner;
 struct AppState {
     game_state: Arc<RwLock<serde_json::Value>>,
     card_store: Arc<RwLock<CardStore>>,
+    /// Mock by default; OpenAI-compatible when CONCLAVE_LLM_* env is set (PR-13).
+    llm: llm::LlmProvider,
 }
 
 struct CardStore {
@@ -329,11 +332,11 @@ async fn runtime_requirements_handler(
     Json(st_api_scanner::scan_card(&card))
 }
 
-/// POST /api/chat — 接收用户消息，返回 mock LLM 响应的渲染结果
+/// POST /api/chat — 接收用户消息，经 LLM provider（默认 mock）生成响应并渲染
 async fn chat_handler(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
-) -> Json<ChatResponse> {
+) -> Result<Json<ChatResponse>, (axum::http::StatusCode, String)> {
     let mut game_state = state.game_state.write().await;
     let card = {
         let store = state.card_store.read().await;
@@ -359,13 +362,18 @@ async fn chat_handler(
     // Mock LLM may still echo user_message; prompt_debug proves the injection path.
     let final_prompt = apply_prompt_injections(&base_prompt, &injections);
 
-    // 2. Mock LLM 响应（演示正则管线效果）.
-    // Mock still echoes `user_message` only — final_prompt is for prompt_debug / Mind proof.
-    let llm_raw_response = format!(
-        r#"【沈慕微】："{}"
-<inner>（内心独白：对方说了 '{}' ...）</inner>"#,
-        req.user_message, req.user_message
-    );
+    // 2. LLM provider (mock default; real when CONCLAVE_LLM_* set — PR-13).
+    // Mock echoes `user_message`; real provider uses final_prompt as system content.
+    let llm_raw_response = state
+        .llm
+        .complete(&final_prompt, &req.user_message)
+        .await
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("LLM provider error ({}): {error}", state.llm.name()),
+            )
+        })?;
 
     // 3. 提取并应用 MVU 变量更新 (on client_mvu base)
     pipeline::mvu_patch::apply_mvu_patch(&mut game_state, &llm_raw_response);
@@ -374,7 +382,7 @@ async fn chat_handler(
     let scripts = card.regex_scripts();
     let rendered_html = render_card_message(&card, &llm_raw_response, &scripts);
 
-    Json(ChatResponse {
+    Ok(Json(ChatResponse {
         raw_text: llm_raw_response,
         rendered_html,
         new_state: game_state.clone(),
@@ -383,7 +391,7 @@ async fn chat_handler(
             final_prompt,
             injections,
         }),
-    })
+    }))
 }
 
 fn build_init_response(store: &CardStore) -> InitResponse {
@@ -968,16 +976,23 @@ mod tests {
         assert_eq!(state["stat_data"]["from"], "server");
     }
 
+    fn test_app_state(card: CardData, game_state: serde_json::Value) -> AppState {
+        AppState {
+            game_state: Arc::new(RwLock::new(game_state)),
+            card_store: Arc::new(RwLock::new(CardStore::new(card, vec![]))),
+            llm: crate::llm::LlmProvider::Mock,
+        }
+    }
+
     #[tokio::test]
     async fn chat_handler_new_state_descends_from_client_mvu_not_server() {
-        let card = minimal_neutral_card();
-        let app = AppState {
-            game_state: Arc::new(RwLock::new(json!({
+        let app = test_app_state(
+            minimal_neutral_card(),
+            json!({
                 "stat_data": { "from": "server_only" },
                 "initialized_lorebooks": {}
-            }))),
-            card_store: Arc::new(RwLock::new(CardStore::new(card, vec![]))),
-        };
+            }),
+        );
 
         let req = ChatRequest {
             user_message: "ping".to_string(),
@@ -989,7 +1004,9 @@ mod tests {
             injections: None,
         };
 
-        let Json(resp) = chat_handler(State(app), Json(req)).await;
+        let Json(resp) = chat_handler(State(app), Json(req))
+            .await
+            .expect("mock chat succeeds");
         assert_eq!(resp.new_state["stat_data"]["from"], "client");
         assert_eq!(resp.new_state["stat_data"]["hp"], 3);
         assert!(
@@ -1060,14 +1077,13 @@ mod tests {
 
     #[tokio::test]
     async fn chat_handler_prompt_debug_includes_mind_injection_content() {
-        let card = minimal_neutral_card();
-        let app = AppState {
-            game_state: Arc::new(RwLock::new(json!({
+        let app = test_app_state(
+            minimal_neutral_card(),
+            json!({
                 "stat_data": {},
                 "initialized_lorebooks": {}
-            }))),
-            card_store: Arc::new(RwLock::new(CardStore::new(card, vec![]))),
-        };
+            }),
+        );
 
         let mind_block = "[Conclave Mind — primary NPC: Demo]\n- [knowledge/unspecified] User likes tea.\n(Do not mention this block unless character would know it.)";
         let req = ChatRequest {
@@ -1085,7 +1101,9 @@ mod tests {
             }]),
         };
 
-        let Json(resp) = chat_handler(State(app), Json(req)).await;
+        let Json(resp) = chat_handler(State(app), Json(req))
+            .await
+            .expect("mock chat succeeds");
         let debug = resp.prompt_debug.expect("prompt_debug required");
         assert!(
             debug.final_prompt.contains("Conclave Mind — primary NPC: Demo"),
@@ -1097,6 +1115,47 @@ mod tests {
         assert_eq!(debug.injections[0].content, mind_block);
         // mock still echoes user message (injection path proven via prompt_debug only)
         assert!(resp.raw_text.contains("hello"));
+    }
+
+    /// G1 regression smoke via handlers: init-shaped response + mock chat path.
+    #[tokio::test]
+    async fn g1_init_and_mock_chat_smoke() {
+        let card = CardData::from_json(include_str!("../data/cangxuan_v1.0.20.json"))
+            .expect("cangxuan fixture parses");
+        let store = CardStore::new(card.clone(), vec![]);
+        let init = build_init_response(&store);
+        assert!(!init.first_message.is_empty() || !init.rendered_html.is_empty());
+        assert_eq!(init.session_epoch, 1);
+        assert!(!init.regex_scripts.is_empty());
+        assert_eq!(init.card_name, card.name);
+
+        let app = test_app_state(
+            card,
+            json!({
+                "stat_data": {},
+                "initialized_lorebooks": {}
+            }),
+        );
+        let req = ChatRequest {
+            user_message: "e2e-smoke-ping".to_string(),
+            session_id: Some("smoke".to_string()),
+            client_mvu: Some(json!({
+                "stat_data": {},
+                "initialized_lorebooks": {}
+            })),
+            injections: None,
+        };
+        let Json(resp) = chat_handler(State(app), Json(req))
+            .await
+            .expect("mock chat ok");
+        assert!(
+            resp.raw_text.contains("e2e-smoke-ping"),
+            "mock must echo user message"
+        );
+        assert!(!resp.rendered_html.is_empty() || !resp.raw_text.is_empty());
+        assert!(resp.new_state.is_object());
+        let debug = resp.prompt_debug.expect("prompt_debug");
+        assert!(!debug.base_prompt.is_empty() || !debug.final_prompt.is_empty());
     }
 }
 
@@ -1130,9 +1189,18 @@ async fn main() {
     // 从卡片的 tavern_helper.variables 读取初始状态
     let initial_state = initial_game_state(&card);
 
+    let llm = llm::LlmProvider::from_env();
+    eprintln!("✓ LLM provider: {}", llm.name());
+    if llm.is_mock() {
+        eprintln!(
+            "  (set CONCLAVE_LLM_BASE_URL + CONCLAVE_LLM_API_KEY for OpenAI-compatible real LLM)"
+        );
+    }
+
     let app_state = AppState {
         game_state: Arc::new(RwLock::new(initial_state)),
         card_store: Arc::new(RwLock::new(CardStore::new(card, persisted_cards))),
+        llm,
     };
 
     let app = Router::new()
@@ -1149,7 +1217,9 @@ async fn main() {
         .layer(middleware::from_fn(cors_middleware))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    eprintln!("✓ 后端已启动: http://localhost:3000");
+    // CONCLAVE_BIND (e.g. 127.0.0.1:18765) for e2e/smoke; default 0.0.0.0:3000.
+    let bind_addr = std::env::var("CONCLAVE_BIND").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+    eprintln!("✓ 后端已启动: http://{bind_addr}");
     axum::serve(listener, app).await.unwrap();
 }
