@@ -6,8 +6,8 @@
 | **作者** | Conclave Architecture（设计稿） |
 | **P0 DRI** | 开工时在 PR-01a 指定单一负责人；未指定前不得并行改 `main.js` 与后端初始状态 |
 | **日期** | 2026-08-01 |
-| **修订** | 2026-08-01 r2 — 吸收 design review 全部 open 项 |
-| **状态** | Draft（P0-ready after r2） |
+| **修订** | 2026-08-01 r3 — 记录 PR-01a～PR-06 落地状态（见 §PR Plan / Implementation Log） |
+| **状态** | In progress — P0 主体已落地；P1 中（PR-06 完成，PR-07 chat 同步待做） |
 | **项目路径** | `/Users/makima/program/Conclave` |
 | **ST 参考源码** | `/Users/makima/program/SillyTavern-release` |
 | **取代方向** | `docs/st-api-compat-plan.md` / `docs/st-api-compat-log.md`（历史补丁日志保留；架构方向以本文为准） |
@@ -1366,13 +1366,13 @@ fn initial_game_state(card: &CardData) -> Value {
 
 ### 阶段
 
-| Phase | 主题 | 出口标准 |
-|-------|------|----------|
-| **P0** | 拆分 + SessionKernel + CapabilityRegistry + 去苍玄硬编码 + 边界 lint | **PR-04/05 后** `main.js <150`；状态机切换卡；requirements→install；无内核 cangxuan 默认；eslint 边界生效 |
-| **P1** | FE test harness + Display RenderPipeline + MessageMount + chat 同步 | vitest golden；StatusPlaceHolder 预通道；N 轮后 TH/DOM/Session 一致 |
-| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH |
-| **P3** | Mind MVP | mock 下 `prompt_debug`+面板含 Mind 块；flag off 无回归 |
-| **P4** | 真 LLM / 多会话 / 任意扩展 / E2E | 真模型；E2E 卡集 |
+| Phase | 主题 | 出口标准 | 状态（r3） |
+|-------|------|----------|------------|
+| **P0** | 拆分 + SessionKernel + CapabilityRegistry + 去苍玄硬编码 + 边界 lint | 状态机切换卡；requirements→install；无内核 cangxuan 默认；eslint 边界生效；**目标** `main.js` 精简 bootstrap（可延后） | **主体完成**（01a–05）；`main.js` 仍为编排中枢（未压到 150 行） |
+| **P1** | FE test harness + Display RenderPipeline + MessageMount + chat 同步 | vitest golden；StatusPlaceHolder 预通道；N 轮后 TH/DOM/Session 一致 | **进行中**：05.5+06 完成；**PR-07 未做** |
+| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | 未开始 |
+| **P3** | Mind MVP | mock 下 `prompt_debug`+面板含 Mind 块；flag off 无回归 | 未开始 |
+| **P4** | 真 LLM / 多会话 / 任意扩展 / E2E | 真模型；E2E 卡集 | 未开始 |
 
 ### 回滚
 
@@ -1384,14 +1384,46 @@ fn initial_game_state(card: &CardData) -> Value {
 ## PR Plan（有序可合并）
 
 > **总则（每个 FE/BE PR）：**  
-> 1. 命令门禁：`npm test && npm run lint && npm run build && cargo test`（`npm test` 自 PR-06 前的 harness PR 起强制；此前无测试文件时 `npm test` 可先 no-op 脚本）。  
+> 1. 命令门禁：`npm test && npm run lint && npm run build && cargo test`（`npm test` 自 PR-05.5 起强制）。  
 > 2. **手动 smoke 清单**（自动化出现前，每个触达 UI 的 PR 必勾）：  
 >    - 启动前后端，开场渲染成功  
 >    - 导入一张 JSON 卡（含苍玄夹具若仓库有）  
 >    - opening swipe 左右切换  
 >    - TH 脚本无控制台未捕获崩溃  
 >    - 发送一条 mock chat，DOM 出现 user+assistant  
-> 3. 依赖可并行时在条目中标明；**关键路径**见文末。
+> 3. 依赖可并行时在条目中标明；**关键路径**见下文。  
+> 4. **状态图例：** ✅ 已落地 · 🔲 未开始 · 🟡 部分完成（见各条「落地说明」）
+
+### Implementation Log（已实现汇总）
+
+> 本地 monorepo 以 **git commit 栈**落地（未必拆成远端 PR）；下表为 r3 事实进度。  
+> 命令基线（2026-08-01 验证）：`npm test` 40 passed · `cargo test` 19 passed · lint / boundaries / build 绿。
+
+| 项 | 状态 | 代表 commit / 说明 |
+|----|------|-------------------|
+| 设计稿 r2 | ✅ | `docs/architecture-host-mind.md` |
+| PR-01a shared 搬迁 | ✅ | 合入 `4bf5c1d` |
+| PR-01b HostShell + diagnostics strip | ✅ | 合入 `4bf5c1d` |
+| PR-01c import 边界 lint + check 脚本 | ✅ | `eslint.config.js` + `scripts/check-import-boundaries.mjs`（ESLint 10 用 `no-restricted-imports`，非 plugin-import） |
+| PR-02 SessionKernel / SessionStore | ✅ | `frontend/src/session/*` |
+| PR-03 BE 中性 `initial_game_state` / `compile_prompt` | ✅ | `backend/src/main.rs`, `lorebook/mod.rs` |
+| PR-03-fe FE 去苍玄默认 | ✅ | `createRuntime` 空 `stat_data`；无假 lorebook 别名 |
+| PR-04 CapabilityRegistry + WindowAdapter + 真实 getContext | ✅ | `st-host/capabilities/*`, `isolation/GlobalAdapter.js`, `context/ContextFactory.js` |
+| PR-05 Ports + EventBus + Lifecycle | ✅ | `bridge/*`, `st-host/context/EventBus.js` · commit `e4a12ba` |
+| PR-05.5 Vitest harness | ✅ | `vitest` · `npm test` · commit `e4a12ba` |
+| PR-06 Display RenderPipeline | ✅ | `st-host/render/*` · `InitResponse.regex_scripts` + `session_epoch` · commit `9c86e11` |
+| **PR-07** Chat 同步 | 🔲 | **下一步** |
+| PR-08…PR-13 | 🔲 | 未开始 |
+
+**落地偏差（已知，不阻塞后续 PR）：**
+
+| 计划项 | 现状 |
+|--------|------|
+| `main.js <150` bootstrap | **未达**：仍为编排中枢（createRuntime / TH 表面等）；Ports/Kernel 已抽出，收尾可另开 PR |
+| MessageMount | PR-06 仅 **薄骨架**；任意 messageId 挂载与列表重绘属 **PR-07** |
+| 后端 `rendered_html` | **保留为 hint**；默认 `display_regex_fe=on` 时 FE `processDisplay` 权威；`=0` 可回退 |
+| Capability 与 surface 创建顺序 | createRuntime 先建 TH/Mvu 再 `registry.install` 报告；catalog 驱动「从零创建 surface」仍为未来项 |
+| Chat 路径 | `sendUserMessage` 仍在 `main.js` 私有 fetch；**未** Session-first append（PR-07） |
 
 ### 关键路径（两条）
 
@@ -1400,61 +1432,79 @@ G1 iframe:  PR-01a → 01b → 02 → 04 → 05 → 06 → 07 → 08 → 09 → 
 G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 （PR-03 后端中性化 ∥ PR-02；PR-03-fe 默认剥离依赖 PR-02）
 （PR-05.5 test harness 在 PR-06 之前，可与 PR-05 并行）
+
+已完成:  01a 01b 01c 02 03 03-fe 04 05 05.5 06
+下一步:  07
 ```
 
-### PR-01a — 纯机械搬迁（无新抽象）
+### PR-01a — 纯机械搬迁（无新抽象） · ✅
 **依赖：** 无  
 **描述：** 创建目录 `shared/`（及空的 `shell/session/st-host/mind/bridge` 占位可省略）；把 `clone`、scoped storage、PNG 解析等 **纯函数** 原样移到 `shared/*`，`main.js` **仍 orchestrate** 全部行为；仅改 import。不引入 SessionKernel / HostShell 类。  
 **主文件：** `frontend/src/shared/*`, `frontend/src/main.js`  
-**验收：** smoke 清单全过；`git diff` 无逻辑分支变化（审查友好）。
+**验收：** smoke 清单全过；`git diff` 无逻辑分支变化（审查友好）。  
+**落地说明：** `shared/{clone,object,escapeHtml,extractHtmlParts,cardFile,scopedStorage}.js` 已存在；与 01b/02 等同批合入。
 
-### PR-01b — HostShell 抽取 + diagnostics 挂载点
+### PR-01b — HostShell 抽取 + diagnostics 挂载点 · ✅
 **依赖：** PR-01a  
 **描述：** 将 DOM 构造/绑定迁入 `shell/HostShell.js`；增加 `#st-diagnostics-strip` 空容器；`main.js` 仍持有 appState/runtime。  
-**验收：** smoke；strip 节点存在。
+**验收：** smoke；strip 节点存在。  
+**落地说明：** `shell/HostShell.js` + strip；Kernel 写入 phase / caps 摘要。
 
-### PR-01c — eslint 边界规则
+### PR-01c — eslint 边界规则 · ✅
 **依赖：** PR-01a  
 **描述：** 加入 `eslint-plugin-import`（或 dependency-cruiser）；落实 §1 禁止表；`npm run lint` CI。  
-**验收：** 故意 `st-host` import `mind` 的冒烟文件被 lint 拒绝（可放 `eslint` 单测或文档化命令）。
+**验收：** 故意 `st-host` import `mind` 的冒烟文件被 lint 拒绝（可放 `eslint` 单测或文档化命令）。  
+**落地说明：** ESLint 10 下用内置 `no-restricted-imports` 正则；`npm run check:import-boundaries` 用临时探针验证拒绝。
 
-### PR-02 — SessionStore + 状态机
+### PR-02 — SessionStore + 状态机 · ✅
 **依赖：** PR-01b  
 **描述：** `SessionKernel`/`SessionStore`；import/select/bootstrap 走状态机；禁止 `ensureRuntime` 隐式双实例；Capability 尚未驱动时 phase 可先跳过 Installing 或空 install。  
-**验收：** 切换卡 teardown 后 messages/mvu 重置；phase 可在 strip 显示。
+**验收：** 切换卡 teardown 后 messages/mvu 重置；phase 可在 strip 显示。  
+**落地说明：** phase：`idle → loading_card → installing_capabilities → running`；`ensureRuntime` 只读不创建；createRuntime 仅 enter-running 路径。
 
-### PR-03 — 后端 initial_game_state / compile_prompt 中性化（可并行）
+### PR-03 — 后端 initial_game_state / compile_prompt 中性化（可并行） · ✅
 **依赖：** 无（**不**依赖 PR-02）  
 **描述：** `initial_game_state` 去苍玄字段；`compile_prompt` 改为通用 WI + state dump + 预留 injections 插入点；保留/更新既有 cargo 测试；增加 **非苍玄最小卡** fixture 断言无「灵石」键。  
 **主文件：** `backend/src/main.rs`, `lorebook/mod.rs`, tests  
-**验收：** `cargo test`；苍玄夹具若依赖旧默认，改为从卡/消息推导或更新断言。
+**验收：** `cargo test`；苍玄夹具若依赖旧默认，改为从卡/消息推导或更新断言。  
+**落地说明：** `stat_data: {}` + `tavern_vars` + `initialized_lorebooks`；中性卡与苍玄夹具测试通过。
 
-### PR-03-fe — 前端去掉苍玄硬编码默认
+### PR-03-fe — 前端去掉苍玄硬编码默认 · ✅
 **依赖：** PR-02, PR-03（建议 BE 先合以免 prompt 仍写死区域）  
 **描述：** 删除 `defaultMvuData` 苍玄结构、档案文案、lorebook 别名；opening MVU 仅 `buildOpeningMvuData` 解析；**夹具门禁**：加载苍玄 opening 后，仅当 first_mes initvar 含键时才断言该键；TH 脚本仍能 boot。  
-**验收：** 非苍玄卡无灵石默认；苍玄 opening TH 无崩溃。
+**验收：** 非苍玄卡无灵石默认；苍玄 opening TH 无崩溃。  
+**落地说明：** 空默认 MVU；lorebook 仅按卡名；缺失键 → `[]`。
 
-### PR-04 — CapabilityRegistry + GlobalAdapter + 消费 requirements
+### PR-04 — CapabilityRegistry + GlobalAdapter + 消费 requirements · ✅
 **依赖：** PR-02, PR-01c  
 **描述：** Catalog 种子表 §4.2；`WindowAdapter`；install report；**拆掉 getContext→TavernHelper**；P0 context 字段矩阵（`chat` live）。  
-**验收：** strip 显示 stubs；`getContext() !== TavernHelper`；`getContext().chat` 长度随 Session；strict 下 required_shims missing 才阻断。
+**验收：** strip 显示 stubs；`getContext() !== TavernHelper`；`getContext().chat` 长度随 Session；strict 下 required_shims missing 才阻断。  
+**落地说明：** `getContext()` 经 ContextFactory；`chat` live 引用 `runtimeState.messages`；strict flag `conclave:feature:strict_capabilities`（默认 on）。
 
-### PR-05 — Ports + EventBus + Lifecycle
+### PR-05 — Ports + EventBus + Lifecycle · ✅
 **依赖：** PR-04  
 **描述：** `bridge/ports.js`、`createPorts`；ST/MVU 事件映射。  
-**验收：** TH `eventOn` 与 lifecycle 钩子单测/手动。
+**验收：** TH `eventOn` 与 lifecycle 钩子单测/手动。  
+**落地说明：** `createPorts` → transcript / promptInjection / lifecycle / diagnostics；Kernel 发 `sessionLoading` / `capabilityInstalled` / `sessionReady` / `sessionTeardown`；chat 路径发 `beforeGenerate` / `afterGenerate`；`window.__conclavePorts` 调试入口。commit `e4a12ba`。
 
-### PR-05.5 — 前端 Vitest harness
+### PR-05.5 — 前端 Vitest harness · ✅
 **依赖：** PR-01a（可与 02–05 并行）  
 **描述：** 添加 `vitest`、`npm test`；一个示例测试；为 PR-06 铺路。  
-**验收：** `npm test` 绿。
+**验收：** `npm test` 绿。  
+**落地说明：** `vitest.config.js`；EventBus / createPorts 测试先绿，后由 PR-06 扩展至 40 tests。
 
-### PR-06 — Display RenderPipeline（含 StatusPlaceHolder）
+### PR-06 — Display RenderPipeline（含 StatusPlaceHolder） · ✅
 **依赖：** PR-05, PR-05.5  
 **描述：** `getRegexedString` + 预注入 + fence；`InitResponse.regex_scripts`；后端 display 权威降级；跨语言 `$n` golden；空 placement 向量。  
-**验收：** vitest 对齐 ST 规则表 + 旧 Rust 夹具向量；状态栏卡不回归。
+**验收：** vitest 对齐 ST 规则表 + 旧 Rust 夹具向量；状态栏卡不回归。  
+**落地说明：**  
+- FE：`st-host/render/{RegexEngine,HtmlFence,RenderPipeline,MessageMount}.js` + golden tests  
+- BE：`regex_scripts` + `session_epoch`（import/select 递增）  
+- 默认 FE display 权威；`display_regex_fe=0` 回退 BE hint  
+- **与 Rust 差异（有意）：** 空 `placement` 按 ST **跳过**脚本（golden 用 `placement: [2]`）；depth / runOnEdit 已实现  
+- commit `9c86e11`
 
-### PR-07 — Chat 同步：消灭三重漂移
+### PR-07 — Chat 同步：消灭三重漂移 · 🔲 **下一步**
 **依赖：** PR-05, PR-06  
 **描述：** `kernel.sendUserMessage`；Session 先 append；MessageMount 任意 messageId；apply `new_state`；ChatRequest/Response 字段；shell 删除私有 fetch 路径。  
 **验收：**  
@@ -1462,47 +1512,50 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 - `getChatMessages('latest')` 为最后 assistant  
 - `mvu` 与 `new_state` 一致  
 
-### PR-08 — ScriptRunner 生命周期 harden
+### PR-08 — ScriptRunner 生命周期 harden · 🔲
 **依赖：** PR-04, PR-06  
 **描述：** 统一 abort/namespace/teardown；与 MessageMount 协同。  
 **验收：** 连切 3 卡无残留节点/监听。
 
-### PR-09 — Card iframe + BridgeProtocol v1
+### PR-09 — Card iframe + BridgeProtocol v1 · 🔲
 **依赖：** PR-08  
 **描述：** `IframeAdapter`；§5.3 方法表；flag `card_iframe`；**sandbox ADR 写入 PR**。  
 **验收：** 卡内 `getChatMessages` 通；parent 无卡 CSS 污染；默认 sandbox 策略已记录。
 
-### PR-10 — getContext P2 字段 + ExtensionManager 骨架
+### PR-10 — getContext P2 字段 + ExtensionManager 骨架 · 🔲
 **依赖：** PR-09  
 **描述：** 按 §5.1 矩阵把 stub 生成路径等补齐到 P2 ready 子集；本地扩展 manifest。  
 **验收：** 扩展 activate；context 字段表勾选完成。
 
-### PR-11 — Mind MVP（默认 flag off）
+### PR-11 — Mind MVP（默认 flag off） · 🔲
 **依赖：** PR-07, PR-05（**不**强制 PR-06，但需 prompt_debug 后端；建议 07 后）  
 **描述：** RuleExtractor §6.2.1；store/dedupe/cleanup/retrieve/compose；Debug panel；后端拼接 injections → `prompt_debug`。  
 **验收：** `?mind=1` 时面板 last injection 与 `prompt_debug` Mind 块一致；flag off 零副作用；无 mvu 写回。
 
-### PR-12 — Mind 调参 + 文档
+### PR-12 — Mind 调参 + 文档 · 🔲
 **依赖：** PR-11  
 **描述：** 抽取质量；cleanup；实现备注写回 `docs/architecture-host-mind.md`。  
 **验收：** 50 turn 记忆受控。
 
-### PR-13 — 真 LLM + E2E 烟测（P4 起）
+### PR-13 — 真 LLM + E2E 烟测（P4 起） · 🔲
 **依赖：** PR-11, PR-10  
 **描述：** provider；CI e2e。  
 **验收：** mock/real 可切；G1 回归绿。
 
-### P0 出口核对（对应阶段表）
+### P0 / P1 出口核对（对应阶段表）
 
-| 项 | 完成于 |
-|----|--------|
-| 目录拆分可维护 | PR-01a/b |
-| eslint 边界 | PR-01c |
-| Session 状态机 | PR-02 |
-| 无苍玄内核默认 | PR-03 + PR-03-fe |
-| Capability 驱动 install | PR-04 |
-| Ports | PR-05 |
-| `main.js <150` bootstrap | PR-04/05 收尾提交 |
+| 项 | 完成于 | 状态 |
+|----|--------|------|
+| 目录拆分可维护 | PR-01a/b | ✅ |
+| eslint 边界 | PR-01c | ✅ |
+| Session 状态机 | PR-02 | ✅ |
+| 无苍玄内核默认 | PR-03 + PR-03-fe | ✅ |
+| Capability 驱动 install | PR-04 | ✅ |
+| Ports + Lifecycle | PR-05 | ✅ |
+| Vitest harness | PR-05.5 | ✅ |
+| Display RenderPipeline + regex_scripts | PR-06 | ✅ |
+| `main.js <150` bootstrap | PR-04/05 收尾 | 🟡 延后（编排仍在 main） |
+| Chat 三重一致 | PR-07 | 🔲 下一步 |
 
 ## Risks
 
