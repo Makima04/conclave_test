@@ -1,14 +1,24 @@
 /**
- * PR-11 Mind MVP tests: flag, extractor, dedupe, beforeGenerate injection.
+ * PR-11 Mind MVP + PR-12 tuning tests: flag, extractor, dedupe, caps, injection.
  */
 import { describe, it, expect } from 'vitest'
 import { isMindEnabled, MIND_FEATURE_KEY } from './flags.js'
 import {
   extractCandidates,
+  isNearDuplicateOfAny,
   looksLikeUiChrome,
+  nameHintScore,
   splitCandidateLines,
+  textSimilarity,
 } from './RuleExtractor.js'
 import { contentHash, normalizeText } from './dedupe.js'
+import {
+  DEFAULT_NPC_CAP,
+  DEFAULT_SESSION_CAP,
+  enforceActiveCaps,
+  purgeCompare,
+  retentionScore,
+} from './cleanup.js'
 import { createMemoryStore } from './MemoryStore.js'
 import { composePrompt } from './promptCompose.js'
 import { createMindService } from './MindService.js'
@@ -52,6 +62,17 @@ describe('RuleExtractor', () => {
     expect(looksLikeUiChrome('Alice remembers the red door near the market.')).toBe(false)
   })
 
+  it('PR-12: broader chrome — script fences, CSS, JSON, pure symbols', () => {
+    expect(looksLikeUiChrome('```js\nconst x = 1\n```')).toBe(true)
+    expect(looksLikeUiChrome('.panel { color: red; margin: 0; }')).toBe(true)
+    expect(looksLikeUiChrome('{ "hp": 12, "mp": 3 }')).toBe(true)
+    expect(looksLikeUiChrome('★★★★')).toBe(true)
+    expect(looksLikeUiChrome('import foo from "bar"')).toBe(true)
+    expect(looksLikeUiChrome('https://example.com/path')).toBe(true)
+    expect(looksLikeUiChrome('<UpdateVariable>x=1</UpdateVariable>')).toBe(true)
+    expect(looksLikeUiChrome('林晚记得码头的灯号暗号已经更换。')).toBe(false)
+  })
+
   it('extracts at most N=3 candidates from last K messages, text ≤200', () => {
     const messages = [
       { role: 'assistant', message_id: 0, message: 'Opening fluff that is long enough here.' },
@@ -87,10 +108,49 @@ describe('RuleExtractor', () => {
     }
   })
 
-  it('splitCandidateLines breaks on newlines and periods', () => {
-    const lines = splitCandidateLines('One line。Two line. Three')
-    expect(lines.some((l) => l.includes('One'))).toBe(true)
-    expect(lines.length).toBeGreaterThanOrEqual(2)
+  it('splitCandidateLines breaks on newlines and CJK/EN sentence ends', () => {
+    const mixed = splitCandidateLines('One line。Two line. Three！Four? Five')
+    expect(mixed.some((l) => l.includes('One'))).toBe(true)
+    expect(mixed.length).toBeGreaterThanOrEqual(4)
+
+    const zh = splitCandidateLines('林晚走进酒馆。她记得旧暗号。码头起雾了！')
+    expect(zh).toHaveLength(3)
+    expect(zh[0]).toContain('林晚')
+  })
+
+  it('avoids near-duplicates within a single extract turn', () => {
+    const messages = [
+      {
+        role: 'assistant',
+        message_id: 0,
+        message: [
+          'Alice remembers the red door near the old market square.',
+          'Alice remembers the red door near the old market.',
+          'Bob knows the silver password for the east gate tonight.',
+        ].join('\n'),
+      },
+    ]
+    const out = extractCandidates(messages, { id: 'primary' }, { maxCandidates: 3 })
+    expect(out.length).toBeLessThanOrEqual(2)
+    // Near-dup Alice lines collapse to one; Bob remains.
+    const texts = out.map((m) => m.text)
+    expect(texts.some((t) => /Alice|red door/i.test(t))).toBe(true)
+    expect(texts.some((t) => /Bob|silver password/i.test(t))).toBe(true)
+  })
+
+  it('textSimilarity / isNearDuplicateOfAny detect overlapping facts', () => {
+    expect(
+      textSimilarity(
+        'Alice remembers the red door near the market',
+        'Alice remembers the red door near the market square',
+      ),
+    ).toBeGreaterThan(0.8)
+    expect(
+      isNearDuplicateOfAny('Captain Rivera knows the pier routes', [
+        'Captain Rivera knows the pier routes under fog',
+      ]),
+    ).toBe(true)
+    expect(nameHintScore('Alice told Bob the secret')).toBeGreaterThan(0)
   })
 })
 
@@ -147,6 +207,92 @@ describe('MemoryStore dedupe + cleanup', () => {
       ])
     }
     expect(store.activeCount()).toBeLessThanOrEqual(3)
+  })
+
+  it('PR-12: 50-turn extract path keeps activeCount under session/npc caps', () => {
+    const sessionCap = 40
+    const npcCap = 30
+    const store = createMemoryStore({ sessionCap, npcCap })
+    const npc = { id: 'primary', displayName: 'Demo' }
+    const messages = []
+    const base = Date.now()
+
+    for (let turn = 0; turn < 50; turn += 1) {
+      const userId = turn * 2
+      const asstId = turn * 2 + 1
+      messages.push({
+        role: 'user',
+        message_id: userId,
+        message: `Turn ${turn}: I met Contact${turn} at district ${turn % 7} near landmark ${turn}.`,
+      })
+      messages.push({
+        role: 'assistant',
+        message_id: asstId,
+        message: [
+          `Contact${turn} knows secret code alpha-${turn} about the northern vault.`,
+          `StatusPlaceHolderImpl`,
+          `_.set(stat_data, "turn", ${turn})`,
+          `<div class="chrome">ui</div>`,
+          `The ledger entry ${turn} lists a debt owed by Merchant${turn} in the harbor.`,
+          `Contact${turn} knows secret code alpha-${turn} about the northern vault again.`,
+        ].join('\n'),
+      })
+
+      const candidates = extractCandidates(messages, npc, {
+        maxCandidates: 3,
+        now: base + turn * 1000,
+        sourceMessageId: asstId,
+      })
+      store.insertMany(candidates, { now: base + turn * 1000 })
+      expect(store.activeCount()).toBeLessThanOrEqual(Math.min(sessionCap, npcCap))
+    }
+
+    expect(store.activeCount()).toBeLessThanOrEqual(npcCap)
+    expect(store.activeCount()).toBeLessThanOrEqual(sessionCap)
+    expect(store.activeCount()).toBeGreaterThan(0)
+    // Defaults documented for production path
+    expect(DEFAULT_SESSION_CAP).toBe(200)
+    expect(DEFAULT_NPC_CAP).toBe(120)
+  })
+
+  it('PR-12: retention prefers high salience + recent touch; purgeCompare deterministic', () => {
+    const now = 1_700_000_000_000
+    const oldLow = {
+      id: 'a',
+      scores: { knowledge: 0.1 },
+      createdAt: now - 10 * 24 * 60 * 60 * 1000,
+      updatedAt: now - 10 * 24 * 60 * 60 * 1000,
+      lastAccessedAt: now - 10 * 24 * 60 * 60 * 1000,
+      accessCount: 0,
+    }
+    const freshHigh = {
+      id: 'b',
+      scores: { knowledge: 0.9 },
+      createdAt: now - 1000,
+      updatedAt: now - 1000,
+      lastAccessedAt: now,
+      accessCount: 4,
+    }
+    expect(retentionScore(freshHigh, now)).toBeGreaterThan(retentionScore(oldLow, now))
+    expect(purgeCompare(oldLow, freshHigh, now)).toBeLessThan(0)
+
+    const records = []
+    for (let i = 0; i < 8; i += 1) {
+      records.push({
+        id: `m${i}`,
+        npcId: 'primary',
+        status: 'active',
+        text: `fact ${i}`,
+        scores: { knowledge: 0.5 },
+        createdAt: now - i * 1000,
+        updatedAt: now - i * 1000,
+        lastAccessedAt: now - i * 1000,
+        accessCount: 0,
+      })
+    }
+    const result = enforceActiveCaps(records, { sessionCap: 3, npcCap: 3, now })
+    expect(result.activeCount).toBe(3)
+    expect(records.filter((r) => r.status === 'active')).toHaveLength(3)
   })
 
   it('retrieve returns top-k within maxChars', () => {

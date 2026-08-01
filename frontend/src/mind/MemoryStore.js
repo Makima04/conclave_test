@@ -3,7 +3,11 @@
  * @module mind/MemoryStore
  */
 
-import { enforceActiveCaps } from './cleanup.js';
+import {
+  DEFAULT_NPC_CAP,
+  DEFAULT_SESSION_CAP,
+  enforceActiveCaps,
+} from './cleanup.js';
 import { contentHash } from './dedupe.js';
 import { retrieveMemories } from './retrieval.js';
 
@@ -15,8 +19,10 @@ import { retrieveMemories } from './retrieval.js';
  * }} [options]
  */
 export function createMemoryStore(options = {}) {
-  const sessionCap = Number.isFinite(options.sessionCap) ? options.sessionCap : 200;
-  const npcCap = Number.isFinite(options.npcCap) ? options.npcCap : 120;
+  const sessionCap = Number.isFinite(options.sessionCap)
+    ? options.sessionCap
+    : DEFAULT_SESSION_CAP;
+  const npcCap = Number.isFinite(options.npcCap) ? options.npcCap : DEFAULT_NPC_CAP;
   const sessionId = options.sessionId != null ? String(options.sessionId) : '0';
 
   /** @type {import('./types.js').MemoryRecord[]} */
@@ -105,9 +111,18 @@ export function createMemoryStore(options = {}) {
     }
 
     let removedExpired = 0;
+    // Always enforce caps after inserts (PR-12: reliable 50-turn bound).
+    // Only skip when caller explicitly sets runCleanup: false (tests).
     if (opts.runCleanup !== false) {
       const result = enforceActiveCaps(records, { sessionCap, npcCap, now });
       removedExpired = result.removedExpired;
+    }
+
+    const active = activeCount();
+    // Belt-and-suspenders: if still over (e.g. concurrent mutation), force again.
+    if (opts.runCleanup !== false && (active > sessionCap || overNpcCap())) {
+      const again = enforceActiveCaps(records, { sessionCap, npcCap, now });
+      removedExpired += again.removedExpired;
     }
 
     cleanupStats = {
@@ -118,6 +133,20 @@ export function createMemoryStore(options = {}) {
     };
 
     return { inserted, merged, cleanup: { ...cleanupStats } };
+  }
+
+  function overNpcCap() {
+    /** @type {Map<string, number>} */
+    const counts = new Map();
+    for (const r of records) {
+      if (r.status !== 'active') continue;
+      const key = r.npcId != null ? String(r.npcId) : 'primary';
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    for (const n of counts.values()) {
+      if (n > npcCap) return true;
+    }
+    return false;
   }
 
   /**
