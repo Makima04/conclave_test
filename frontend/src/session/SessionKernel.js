@@ -59,6 +59,7 @@ export const SESSION_PHASE_TRANSITIONS = {
  * @property {{ setDiagnostics?: (text: string|null|undefined) => void }} shell
  * @property {() => import('./types.js').SessionRuntime} createRuntime
  * @property {SessionKernelHooks} hooks
+ * @property {import('../bridge/ports.js').Lifecycle} [lifecycle]  // PR-05 ports lifecycle
  */
 
 /**
@@ -96,7 +97,7 @@ function formatCapabilitiesSummary(caps) {
 /**
  * @param {CreateSessionKernelOptions} options
  */
-export function createSessionKernel({ store, shell, createRuntime, hooks }) {
+export function createSessionKernel({ store, shell, createRuntime, hooks, lifecycle }) {
   if (!store) throw new Error('createSessionKernel: store is required');
   if (typeof createRuntime !== 'function') {
     throw new Error('createSessionKernel: createRuntime factory is required');
@@ -113,6 +114,19 @@ export function createSessionKernel({ store, shell, createRuntime, hooks }) {
     showError,
     installCapabilities,
   } = hooks || {};
+
+  /**
+   * @param {import('../bridge/ports.js').LifecycleEvent} event
+   * @param {any} [payload]
+   */
+  async function emitLifecycle(event, payload) {
+    if (!lifecycle || typeof lifecycle.emit !== 'function') return;
+    try {
+      await lifecycle.emit(event, payload);
+    } catch (error) {
+      console.warn(`[SessionKernel] lifecycle.emit(${event}) failed:`, error);
+    }
+  }
 
   /**
    * Push phase + lastError + capability summary into #st-diagnostics-strip.
@@ -166,6 +180,11 @@ export function createSessionKernel({ store, shell, createRuntime, hooks }) {
       transitionTo('tearing_down');
     }
 
+    void emitLifecycle('sessionTeardown', {
+      cardName: store.getCardName(),
+      toIdle,
+    });
+
     if (typeof clearPendingRefreshTimers === 'function') {
       clearPendingRefreshTimers();
     }
@@ -182,6 +201,13 @@ export function createSessionKernel({ store, shell, createRuntime, hooks }) {
       }
     } catch (error) {
       console.warn('[SessionKernel] capability teardown error:', error);
+    }
+
+    // Clear TH EventBus listeners if present.
+    try {
+      runtime?.eventBus?.clear?.();
+    } catch {
+      /* ignore */
     }
 
     store.clearRuntime();
@@ -241,6 +267,10 @@ export function createSessionKernel({ store, shell, createRuntime, hooks }) {
 
       transitionTo('loading_card');
       store.applyInitPayload(data);
+      await emitLifecycle('sessionLoading', {
+        cardName: store.getCardName(),
+        requirements: store.getRequirements(),
+      });
 
       transitionTo('installing_capabilities');
 
@@ -289,6 +319,10 @@ export function createSessionKernel({ store, shell, createRuntime, hooks }) {
         }
       }
 
+      if (report) {
+        await emitLifecycle('capabilityInstalled', { report });
+      }
+
       transitionTo('running');
 
       if (typeof renderShell === 'function') renderShell();
@@ -298,6 +332,11 @@ export function createSessionKernel({ store, shell, createRuntime, hooks }) {
       if (typeof executeTavernHelperScripts === 'function') {
         void executeTavernHelperScripts();
       }
+
+      await emitLifecycle('sessionReady', {
+        cardName: store.getCardName(),
+        capabilities: report,
+      });
     } catch (error) {
       fail(error, { showUi: false });
       throw error;

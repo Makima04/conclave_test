@@ -58,6 +58,7 @@
  * @property {object} [contextFactory]
  * @property {object} [surfaces]
  * @property {object} [capabilityRegistry]
+ * @property {object} [eventBus] PR-05 EventBus instance
  */
 
 /**

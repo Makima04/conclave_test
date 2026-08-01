@@ -16,16 +16,24 @@ import { createSessionStore } from './session/SessionStore.js';
 import { createSessionKernel } from './session/SessionKernel.js';
 import { createWindowAdapter } from './st-host/isolation/GlobalAdapter.js';
 import { createContextFactory } from './st-host/context/ContextFactory.js';
+import { createEventBus } from './st-host/context/EventBus.js';
 import {
   createCapabilityCatalog,
   createCapabilityRegistry,
   isStrictCapabilities,
 } from './st-host/capabilities/index.js';
+import { createPorts } from './bridge/createPorts.js';
+import { MVU_EVENTS } from './bridge/stEventMap.js';
 
 const OPENING_SWIPE_REFRESH_DELAY_MS = 650;
 
 /** Session truth: phase, card payload, requirements, runtime. */
 const store = createSessionStore();
+
+/** Ports for Mind / diagnostics (bridge layer; no st-host imports inside). */
+const ports = createPorts({
+  getRuntime: () => store.getRuntime(),
+});
 
 /**
  * UI / host-chrome state only (not session authority).
@@ -678,7 +686,12 @@ function createRuntime() {
       extension: {},
     },
   };
-  const eventListeners = {};
+  // PR-05: shared EventBus for TH eventOn/eventEmit and getContext().eventSource
+  const eventBus = createEventBus({
+    thisArg: typeof window !== 'undefined' ? window : undefined,
+  });
+  const { eventOn, eventOnce, eventEmit, eventRemoveListener } = eventBus;
+  const eventSourceApi = eventBus.asEventSource();
 
   function normalizeMessageId(messageId) {
     if (messageId === 'latest') return runtimeState.messages.length - 1;
@@ -902,7 +915,7 @@ function createRuntime() {
       if (messageId === runtimeState.messages.length - 1) {
         runtimeState.mvuData = clone(current.data || {});
         if (!_.isEqual(oldData, current.data || {})) {
-          void eventEmit(Mvu.events.VARIABLE_UPDATE_ENDED, runtimeState.mvuData, oldData);
+          void eventEmitWithDom(Mvu.events.VARIABLE_UPDATE_ENDED, runtimeState.mvuData, oldData);
         }
       }
       affectedRefreshDelays.set(
@@ -956,37 +969,17 @@ function createRuntime() {
     return '';
   }
 
-  function eventOn(event, listener) {
-    eventListeners[event] = eventListeners[event] || [];
-    eventListeners[event].push(listener);
-    return {
-      stop() {
-        eventRemoveListener(event, listener);
-      },
-    };
-  }
-
-  function eventOnce(event, listener) {
-    const wrapped = (...args) => {
-      eventRemoveListener(event, wrapped);
-      return listener(...args);
-    };
-    return eventOn(event, wrapped);
-  }
-
-  function eventRemoveListener(event, listener) {
-    eventListeners[event] = (eventListeners[event] || []).filter(item => item !== listener);
-  }
-
-  async function eventEmit(event, ...args) {
-    console.debug('[ConclaveSTHost] runtime event:', { event, args });
-    for (const listener of eventListeners[event] || []) await listener.apply(window, args);
-    window.dispatchEvent(new CustomEvent('conclave:variables-updated', { detail: { event, args } }));
+  /** Wrap EventBus emit so DOM custom events still fire for legacy listeners. */
+  async function eventEmitWithDom(event, ...args) {
+    await eventEmit(event, ...args);
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('conclave:variables-updated', { detail: { event, args } }));
+    }
   }
 
   function initializeGlobal(globalName, value) {
     _.set(window, globalName, value);
-    void eventEmit(`global_${globalName}_initialized`, value);
+    void eventEmitWithDom(`global_${globalName}_initialized`, value);
   }
 
   async function waitGlobalInitialized(globalName) {
@@ -1008,13 +1001,7 @@ function createRuntime() {
   }
 
   const Mvu = {
-    events: {
-      VARIABLE_INITIALIZED: 'mag_variable_initiailized',
-      VARIABLE_UPDATE_STARTED: 'mag_variable_update_started',
-      COMMAND_PARSED: 'mag_command_parsed',
-      VARIABLE_UPDATE_ENDED: 'mag_variable_update_ended',
-      BEFORE_MESSAGE_UPDATE: 'mag_before_message_update',
-    },
+    events: { ...MVU_EVENTS },
     getMvuData(options = { type: 'message', message_id: 'latest' }) {
       return getVariables(options);
     },
@@ -1022,7 +1009,7 @@ function createRuntime() {
       const oldData = clone(runtimeState.mvuData || {});
       replaceVariables(mvuData, options);
       runtimeState.mvuData = clone(mvuData);
-      void eventEmit(Mvu.events.VARIABLE_UPDATE_ENDED, runtimeState.mvuData, oldData);
+      void eventEmitWithDom(Mvu.events.VARIABLE_UPDATE_ENDED, runtimeState.mvuData, oldData);
     },
     async parseMessage(_message, oldData) {
       // Stub: full MagVarUpdate parse lands later; surface is ready subset.
@@ -1052,15 +1039,8 @@ function createRuntime() {
     formatAsTavernRegexedString,
     eventOn,
     eventOnce,
-    eventEmit,
+    eventEmit: eventEmitWithDom,
     eventRemoveListener,
-  };
-
-  const eventSourceApi = {
-    on: eventOn,
-    once: eventOnce,
-    emit: eventEmit,
-    removeListener: eventRemoveListener,
   };
 
   // PR-04: real getContext() via ContextFactory — NEVER returns TavernHelper.
@@ -1098,7 +1078,7 @@ function createRuntime() {
   define('formatAsTavernRegexedString', formatAsTavernRegexedString);
   define('eventOn', eventOn);
   define('eventOnce', eventOnce);
-  define('eventEmit', eventEmit);
+  define('eventEmit', eventEmitWithDom);
   define('eventRemoveListener', eventRemoveListener);
   define('eventSource', eventSourceApi);
   define('Mvu', Mvu);
@@ -1115,7 +1095,7 @@ function createRuntime() {
     eventApi: {
       eventOn,
       eventOnce,
-      eventEmit,
+      eventEmit: eventEmitWithDom,
       eventRemoveListener,
     },
     contextFactory,
@@ -1127,7 +1107,8 @@ function createRuntime() {
   return {
     runtimeState,
     triggerSlash,
-    eventEmit,
+    eventEmit: eventEmitWithDom,
+    eventBus,
     adapter,
     contextFactory,
     surfaces,
@@ -1309,14 +1290,36 @@ async function sendUserMessage() {
   appendUserMessage(messageArea, message);
 
   try {
+    // PR-05: lifecycle hooks for Mind / diagnostics (before LLM path)
+    const injections = ports.promptInjection.list();
+    await ports.lifecycle.emit('beforeGenerate', {
+      userMessage: message,
+      injections,
+    });
+
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_message: message }),
+      body: JSON.stringify({
+        user_message: message,
+        // Future: forward ports.promptInjection.list() as injections[]
+        injections: ports.promptInjection.list().map(({ key, ...rest }) => ({
+          key,
+          ...rest,
+        })),
+      }),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     appendAssistantMessage(messageArea, data.rendered_html || '');
+
+    await ports.lifecycle.emit('afterGenerate', {
+      userMessage: message,
+      raw: data.raw_text ?? data.raw ?? null,
+      renderedHtml: data.rendered_html || '',
+      promptDebug: data.prompt_debug || null,
+      messageId: store.getRuntime()?.runtimeState?.messages?.length ?? null,
+    });
   } catch (error) {
     const node = document.createElement('div');
     node.className = 'st-error-message';
@@ -1346,6 +1349,7 @@ kernel = createSessionKernel({
   store,
   shell,
   createRuntime,
+  lifecycle: ports.lifecycle,
   hooks: {
     clearPendingRefreshTimers,
     cleanupCardArtifacts,
@@ -1364,6 +1368,11 @@ kernel = createSessionKernel({
     installCapabilities,
   },
 });
+
+// Expose ports for debug / future Mind bootstrap (not a public ST API).
+if (typeof window !== 'undefined') {
+  window.__conclavePorts = ports;
+}
 
 window.addEventListener('error', event => {
   console.warn('[ConclaveSTHost] runtime error:', {
