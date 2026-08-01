@@ -198,6 +198,83 @@ export function createSessionStore() {
     snapshot.capabilities = null;
   }
 
+  /**
+   * PR-07: Session-facing view of chat transcript (runtimeState.messages).
+   * TH getChatMessages / MessageMount read this same array.
+   * @returns {object[]}
+   */
+  function getMessages() {
+    const list = snapshot.runtime?.runtimeState?.messages;
+    return Array.isArray(list) ? list : [];
+  }
+
+  /**
+   * PR-07: Session-facing MVU snapshot (runtimeState.mvuData).
+   * @returns {object}
+   */
+  function getMvu() {
+    return snapshot.runtime?.runtimeState?.mvuData || {};
+  }
+
+  /**
+   * PR-07: Append a chat message to Session transcript (Session-first send path).
+   * Prefer ports.transcript.append from Kernel; this is the store-level equivalent.
+   * @param {Partial<import('./types.js').ChatMessage>} msg
+   * @returns {object}
+   */
+  function appendMessage(msg = {}) {
+    const state = snapshot.runtime?.runtimeState;
+    if (!state || !Array.isArray(state.messages)) {
+      throw new Error('SessionStore.appendMessage: runtime messages unavailable');
+    }
+    const isUser = msg.role === 'user';
+    const text = msg.message ?? '';
+    const entry = {
+      message_id: state.messages.length,
+      role: msg.role || 'assistant',
+      name: msg.name || (isUser ? 'User' : 'assistant'),
+      is_hidden: !!msg.is_hidden,
+      message: String(text),
+      data: msg.data && typeof msg.data === 'object' ? msg.data : {},
+      extra: msg.extra && typeof msg.extra === 'object' ? msg.extra : {},
+      swipe_id: Number.isFinite(Number(msg.swipe_id)) ? Number(msg.swipe_id) : 0,
+      swipes: Array.isArray(msg.swipes) ? msg.swipes : [String(text)],
+      rendered_swipes: Array.isArray(msg.rendered_swipes) ? msg.rendered_swipes : [''],
+      swipes_data: Array.isArray(msg.swipes_data)
+        ? msg.swipes_data
+        : [msg.data && typeof msg.data === 'object' ? msg.data : {}],
+      swipes_info: Array.isArray(msg.swipes_info) ? msg.swipes_info : [{}],
+    };
+    state.messages.push(entry);
+    return entry;
+  }
+
+  /**
+   * PR-07: Replace session MVU and latest assistant message data (server new_state).
+   * @param {object} mvu
+   * @param {string} [reason]
+   */
+  function replaceMvu(mvu, reason = 'session.replaceMvu') {
+    const state = snapshot.runtime?.runtimeState;
+    if (!state) {
+      throw new Error('SessionStore.replaceMvu: runtime unavailable');
+    }
+    const next = mvu && typeof mvu === 'object' ? mvu : {};
+    state.mvuData = next;
+    const list = state.messages;
+    if (Array.isArray(list) && list.length) {
+      const last = list[list.length - 1];
+      if (last && last.role === 'assistant') {
+        last.data = next;
+        const swipeId = Number.isFinite(Number(last.swipe_id)) ? Number(last.swipe_id) : 0;
+        if (Array.isArray(last.swipes_data)) {
+          last.swipes_data[swipeId] = next;
+        }
+      }
+    }
+    void reason;
+  }
+
   return {
     getSnapshot,
     getPhase,
@@ -221,6 +298,10 @@ export function createSessionStore() {
     setCapabilities,
     applyInitPayload,
     resetCardData,
+    getMessages,
+    getMvu,
+    appendMessage,
+    replaceMvu,
   };
 }
 

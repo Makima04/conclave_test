@@ -104,9 +104,34 @@ impl CardStore {
     }
 }
 
+/// Prompt injection item (PR-07 accept; full Mind apply in PR-11).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct InjectionItem {
+    #[serde(default)]
+    key: Option<String>,
+    content: String,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    position: Option<String>,
+    #[serde(default)]
+    depth: Option<f64>,
+    #[serde(default)]
+    ephemeral: Option<bool>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// POST /api/chat body (architecture ChatRequest).
 #[derive(Deserialize)]
 struct ChatRequest {
     user_message: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    client_mvu: Option<serde_json::Value>,
+    #[serde(default)]
+    injections: Option<Vec<InjectionItem>>,
 }
 
 #[derive(Deserialize)]
@@ -120,10 +145,20 @@ struct SelectCardRequest {
 }
 
 #[derive(Serialize)]
+struct PromptDebug {
+    base_prompt: String,
+    final_prompt: String,
+    injections: Vec<InjectionItem>,
+}
+
+/// POST /api/chat response (architecture ChatResponse).
+#[derive(Serialize)]
 struct ChatResponse {
     raw_text: String,
     rendered_html: String,
     new_state: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_debug: Option<PromptDebug>,
 }
 
 #[derive(Serialize)]
@@ -305,12 +340,37 @@ async fn chat_handler(
         store.current_card().clone()
     };
 
-    // 1. 组装 Prompt（通用 WI 摘要 + state dump；injections 默认空，Mind 预留）
-    let _system_prompt = lorebook::compile_prompt(
+    // PR-07: client_mvu is the FE Session base; fall back to server projection when absent.
+    if let Some(client) = req.client_mvu {
+        if client.is_object() {
+            *game_state = client;
+        }
+    }
+    // session_id accepted for future multi-session routing (unused in single-session MVP).
+    let _session_id = req.session_id.as_deref();
+    let _ = _session_id;
+
+    let injections = req.injections.unwrap_or_default();
+
+    // 1. 组装 Prompt（通用 WI 摘要 + state dump）
+    let base_prompt = lorebook::compile_prompt(
         &serde_json::to_value(&card).unwrap_or_default(),
         &game_state,
         None,
     );
+
+    // PR-07/PR-11: accept injections[]; stub-apply by appending contents for prompt_debug.
+    // Full position/depth semantics land with Mind (PR-11).
+    let final_prompt = if injections.is_empty() {
+        base_prompt.clone()
+    } else {
+        let inj_text: String = injections
+            .iter()
+            .map(|item| item.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{base_prompt}\n\n{inj_text}")
+    };
 
     // 2. Mock LLM 响应（演示正则管线效果）
     let llm_raw_response = format!(
@@ -319,10 +379,10 @@ async fn chat_handler(
         req.user_message, req.user_message
     );
 
-    // 3. 提取并应用 MVU 变量更新
+    // 3. 提取并应用 MVU 变量更新 (on client_mvu base)
     pipeline::mvu_patch::apply_mvu_patch(&mut game_state, &llm_raw_response);
 
-    // 4. 执行正则管线 (生成前端需要的 HTML)
+    // 4. 执行正则管线 (hint only after FE display authority; still returned for debug/fallback)
     let scripts = card.regex_scripts();
     let rendered_html = render_card_message(&card, &llm_raw_response, &scripts);
 
@@ -330,6 +390,11 @@ async fn chat_handler(
         raw_text: llm_raw_response,
         rendered_html,
         new_state: game_state.clone(),
+        prompt_debug: Some(PromptDebug {
+            base_prompt,
+            final_prompt,
+            injections,
+        }),
     })
 }
 

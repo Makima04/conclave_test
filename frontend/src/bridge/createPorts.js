@@ -180,6 +180,7 @@ export function createPorts(options) {
     },
 
     /**
+     * Replace session MVU and latest assistant message data (PR-07 new_state apply).
      * @param {object} mvu
      * @param {string} reason
      */
@@ -191,7 +192,20 @@ export function createPorts(options) {
       if (!state) {
         throw new Error('ChatTranscript.replaceMvu: runtime unavailable');
       }
-      state.mvuData = mvu && typeof mvu === 'object' ? mvu : {};
+      const next = mvu && typeof mvu === 'object' ? mvu : {};
+      state.mvuData = next;
+      // Design §3.3: new_state replaces latest assistant message data + session mvu.
+      const list = state.messages;
+      if (Array.isArray(list) && list.length) {
+        const last = list[list.length - 1];
+        if (last && last.role === 'assistant') {
+          last.data = next;
+          const swipeId = Number.isFinite(Number(last.swipe_id)) ? Number(last.swipe_id) : 0;
+          if (Array.isArray(last.swipes_data)) {
+            last.swipes_data[swipeId] = next;
+          }
+        }
+      }
       diagnostics.log('info', 'transcript.replaceMvu', { reason });
     },
   };
