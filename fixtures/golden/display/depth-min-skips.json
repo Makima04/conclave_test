@@ -1,0 +1,27 @@
+{
+  "id": "depth-min-skips",
+  "description": "minDepth filters by depth",
+  "source": "st-engine minDepth",
+  "st_align": "depth < minDepth skip",
+  "raw": "alpha beta",
+  "scripts": [
+    {
+      "scriptName": "deep only",
+      "findRegex": "alpha",
+      "replaceString": "ALPHA",
+      "placement": [
+        2
+      ],
+      "minDepth": 2,
+      "maxDepth": null,
+      "markdownOnly": false,
+      "promptOnly": false,
+      "disabled": false
+    }
+  ],
+  "options": {
+    "placement": 2,
+    "depth": 0
+  },
+  "expected": "alpha beta"
+}

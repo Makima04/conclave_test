@@ -10,6 +10,9 @@
     "check:import-boundaries": "node scripts/check-import-boundaries.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:cards": "vitest run tests/display-golden.test.js tests/cardHost.integration.test.js",
+    "golden:refresh": "node ../scripts/golden-refresh.mjs",
+    "golden:check": "node ../scripts/golden-refresh.mjs --check",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,0 +1,46 @@
+{
+  "id": "card-regex-basic-opening",
+  "description": "Opening display for fixture card regex-basic",
+  "source": "fixtures/cards/regex-basic/card.json",
+  "st_align": "getRegexedString AI_OUTPUT + StatusPlaceHolder pre-pass",
+  "raw": "<customized>角色开场</customized>",
+  "scripts": [
+    {
+      "id": "prompt-cleanup",
+      "scriptName": "prompt cleanup",
+      "findRegex": "<customized>\\s*(.*?)\\s*</customized>",
+      "replaceString": "开场",
+      "placement": [
+        2
+      ],
+      "disabled": false,
+      "markdownOnly": false,
+      "promptOnly": true,
+      "runOnEdit": false,
+      "minDepth": null,
+      "maxDepth": null,
+      "substituteRegex": 0
+    },
+    {
+      "id": "display-ui",
+      "scriptName": "display ui",
+      "findRegex": "<customized>\\s*(.*?)\\s*</customized>",
+      "replaceString": "```html <!doctype html><div class=\"panel\">$1</div>```",
+      "placement": [
+        2
+      ],
+      "disabled": false,
+      "markdownOnly": true,
+      "promptOnly": false,
+      "runOnEdit": false,
+      "minDepth": null,
+      "maxDepth": null,
+      "substituteRegex": 0
+    }
+  ],
+  "options": {
+    "placement": 2,
+    "depth": 0
+  },
+  "expected": "<!doctype html><div class=\"panel\">角色开场</div>"
+}

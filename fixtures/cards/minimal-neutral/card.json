@@ -1,0 +1,53 @@
+{
+  "name": "Minimal Neutral",
+  "description": "Synthetic fixture: no cangxuan / 灵石 fields.",
+  "personality": "",
+  "scenario": "A quiet crossroads.",
+  "first_mes": "Hello, traveler. This is a neutral demo card.",
+  "mes_example": "",
+  "creatorcomment": "conclave-fixture",
+  "tags": ["test", "fixture", "neutral"],
+  "spec": "chara_card_v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "Minimal Neutral",
+    "description": "Synthetic fixture: no cangxuan / 灵石 fields.",
+    "personality": "",
+    "scenario": "A quiet crossroads.",
+    "first_mes": "Hello, traveler. This is a neutral demo card.",
+    "mes_example": "",
+    "system_prompt": "You narrate a simple adventure without game-economy jargon.",
+    "post_history_instructions": "",
+    "tags": ["test", "fixture", "neutral"],
+    "alternate_greetings": [
+      "Second opening swipe for the neutral card."
+    ],
+    "character_book": {
+      "name": "Neutral Book",
+      "entries": [
+        {
+          "id": 1,
+          "keys": ["crossroads"],
+          "secondary_keys": [],
+          "comment": "constant flavor",
+          "content": "The crossroads smell of rain.",
+          "constant": true,
+          "selective": false,
+          "insertion_order": 100,
+          "enabled": true,
+          "position": "before_char",
+          "use_regex": false,
+          "extensions": {}
+        }
+      ]
+    },
+    "extensions": {
+      "tavern_helper": {
+        "variables": {
+          "mood": "calm"
+        },
+        "scripts": []
+      }
+    }
+  }
+}

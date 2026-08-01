@@ -786,6 +786,8 @@ mod tests {
     use axum::extract::State;
     use axum::Json;
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -1130,6 +1132,84 @@ mod tests {
         assert_eq!(debug.injections[0].content, mind_block);
         // mock still echoes user message (injection path proven via prompt_debug only)
         assert!(resp.raw_text.contains("hello"));
+    }
+
+    fn fixtures_cards_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/cards")
+    }
+
+    fn load_fixture_card(id: &str) -> CardData {
+        let path = fixtures_cards_dir().join(id).join("card.json");
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
+        CardData::from_json(&raw).unwrap_or_else(|e| panic!("parse fixture {id}: {e}"))
+    }
+
+    #[test]
+    fn multi_card_import_select_epoch_and_names() {
+        let neutral = load_fixture_card("minimal-neutral");
+        let regex = load_fixture_card("regex-basic");
+        let status = load_fixture_card("status-bar");
+
+        let mut store = CardStore::new(neutral.clone(), vec![]);
+        assert_eq!(store.session_epoch, 1);
+        assert_eq!(store.current_card().name, "Minimal Neutral");
+
+        let id_regex = store.import_card(regex, None);
+        assert_eq!(store.session_epoch, 2);
+        assert_eq!(store.current_id, id_regex);
+        assert_eq!(store.current_card().name, "Regex Basic");
+
+        let id_status = store.import_card(status, None);
+        assert_eq!(store.session_epoch, 3);
+        assert_eq!(store.current_card().name, "Status Bar Demo");
+
+        store
+            .select_card(0)
+            .expect("default neutral remains selectable");
+        assert_eq!(store.session_epoch, 4);
+        assert_eq!(store.current_card().name, "Minimal Neutral");
+
+        // re-select status
+        store.select_card(id_status).expect("status card");
+        assert_eq!(store.current_card().name, "Status Bar Demo");
+        assert_eq!(store.session_epoch, 5);
+
+        // Init payloads for each card expose correct first_mes + regex_scripts
+        store.select_card(id_regex).unwrap();
+        let init_regex = build_init_response(&store);
+        assert_eq!(init_regex.card_name, "Regex Basic");
+        assert!(init_regex.first_message.contains("customized"));
+        assert!(
+            init_regex.regex_scripts.len() >= 2,
+            "regex-basic fixture must ship display+prompt scripts"
+        );
+
+        store.select_card(0).unwrap();
+        let init_neutral = build_init_response(&store);
+        assert_eq!(init_neutral.card_name, "Minimal Neutral");
+        let state = initial_game_state(store.current_card());
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert!(!serialized.contains("灵石"));
+        assert!(!serialized.contains("世界系统"));
+    }
+
+    #[test]
+    fn fixture_status_bar_init_hint_contains_status_card_when_variable_payload() {
+        let card = load_fixture_card("status-bar");
+        let store = CardStore::new(card, vec![]);
+        let init = build_init_response(&store);
+        // Backend rendered_html is a deprecated hint; still useful as smoke for status path.
+        assert!(
+            init.rendered_html.contains("status-card")
+                || init.first_message.contains("UpdateVariable"),
+            "status-bar fixture should surface status path: {}",
+            init.rendered_html
+        );
+        // Alternate greeting without variable payload should not inject status in FE path;
+        // backend hint for greetings[0] is the intro page.
+        assert!(!init.greetings.is_empty());
+        assert!(init.greetings[0].contains("右滑") || init.greetings[0].contains("说明"));
     }
 
     /// G1 regression smoke via handlers: init-shaped response + mock chat path.

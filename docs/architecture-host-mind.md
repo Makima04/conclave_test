@@ -1398,14 +1398,19 @@ fn initial_game_state(card: &CardData) -> Value {
 
 > **总则（每个 FE/BE PR）：**  
 > 1. 命令门禁：`npm test && npm run lint && npm run build && cargo test`（`npm test` 自 PR-05.5 起强制）。  
-> 2. **手动 smoke 清单**（自动化出现前，每个触达 UI 的 PR 必勾）：  
+> 2. **卡片 / 前端效果回归（自动化，优先于纯手动）：**  
+>    - `cd frontend && npm run test:cards` — display golden（ST-aligned oracle）+ 多卡 Host 集成（A→chat→B）  
+>    - `node scripts/golden-refresh.mjs --check` — golden 与 oracle 无漂移  
+>    - `cd backend && cargo test multi_card` — 多夹具 import/select + epoch  
+>    - 夹具说明：`fixtures/README.md`  
+> 3. **手动 smoke 清单**（浏览器 UI 仍建议每个触达 chrome 的 PR 勾一次）：  
 >    - 启动前后端，开场渲染成功  
 >    - 导入一张 JSON 卡（含苍玄夹具若仓库有）  
 >    - opening swipe 左右切换  
 >    - TH 脚本无控制台未捕获崩溃  
 >    - 发送一条 mock chat，DOM 出现 user+assistant  
-> 3. 依赖可并行时在条目中标明；**关键路径**见下文。  
-> 4. **状态图例：** ✅ 已落地 · 🔲 未开始 · 🟡 部分完成（见各条「落地说明」）
+> 4. 依赖可并行时在条目中标明；**关键路径**见下文。  
+> 5. **状态图例：** ✅ 已落地 · 🔲 未开始 · 🟡 部分完成（见各条「落地说明」）
 
 ### Implementation Log（已实现汇总）
 

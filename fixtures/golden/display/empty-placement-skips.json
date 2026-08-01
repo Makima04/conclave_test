@@ -1,0 +1,22 @@
+{
+  "id": "empty-placement-skips",
+  "description": "ST: empty placement array skips script",
+  "source": "st-engine placement.includes",
+  "st_align": "empty placement skip",
+  "raw": "hello world",
+  "scripts": [
+    {
+      "scriptName": "no-place",
+      "findRegex": "hello",
+      "replaceString": "bye",
+      "placement": [],
+      "markdownOnly": false,
+      "promptOnly": false,
+      "disabled": false
+    }
+  ],
+  "options": {
+    "placement": 2
+  },
+  "expected": "hello world"
+}
