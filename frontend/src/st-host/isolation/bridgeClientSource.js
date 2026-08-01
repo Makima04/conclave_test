@@ -2,21 +2,45 @@
  * Bridge client script source injected into the card iframe (PR-09).
  * Exposes TH / MVU / event / storage proxies that RPC to the parent via BridgeProtocol v1.
  *
+ * TH method names are generated from BridgeProtocol.TH_CALL_METHODS to avoid drift.
+ *
+ * updateVariablesWith: function updaters cannot cross postMessage. The client applies
+ * them locally after getVariables and commits via replaceVariables.
+ *
+ * Storage: under opaque sandbox real localStorage throws; we expose
+ * `__conclaveBridgeStorage` (async RPC) and a best-effort sync in-memory facade
+ * shadowed as `localStorage` where defineProperty allows. Sync parity is limited.
+ *
+ * Mvu surface: use `window.Mvu` or `window.parentMvu`. Raw `parent.Mvu` is
+ * unavailable under opaque sandbox (cross-origin cannot assign onto parent).
+ *
  * @module st-host/isolation/bridgeClientSource
  */
+
+import { TH_CALL_METHODS, MVU_CALL_METHODS } from './BridgeProtocol.js';
 
 /**
  * Build the iframe-side bridge client as an IIFE string.
  *
- * @param {{ sessionId: string }} options
+ * @param {{ sessionId: string, parentOrigin?: string }} options
  * @returns {string}
  */
-export function buildBridgeClientSource({ sessionId }) {
+export function buildBridgeClientSource({ sessionId, parentOrigin }) {
   const sid = JSON.stringify(String(sessionId || 'default'));
+  const originJson = JSON.stringify(
+    parentOrigin && parentOrigin !== 'null' ? String(parentOrigin) : '*',
+  );
+  // Generate from frozen allowlist so client/host cannot drift (review issue 8).
+  const thMethodsJson = JSON.stringify([...TH_CALL_METHODS]);
+  // Exclude 'events' from callable wrappers (read via separate populate).
+  const mvuCallable = MVU_CALL_METHODS.filter((m) => m !== 'events');
+  const mvuMethodsJson = JSON.stringify([...mvuCallable]);
+
   return `
 (function() {
   'use strict';
   var SESSION_ID = ${sid};
+  var PARENT_ORIGIN = ${originJson};
   var pending = Object.create(null);
   var seq = 0;
   var cbHandlers = Object.create(null);
@@ -24,6 +48,19 @@ export function buildBridgeClientSource({ sessionId }) {
   function nextId() {
     seq += 1;
     return 'c' + String(seq) + '_' + String(Date.now());
+  }
+
+  function postToParent(msg) {
+    try {
+      parent.postMessage(msg, PARENT_ORIGIN);
+    } catch (err) {
+      // Fallback if concrete origin is rejected (e.g. unexpected sandbox mode).
+      if (PARENT_ORIGIN !== '*') {
+        parent.postMessage(msg, '*');
+      } else {
+        throw err;
+      }
+    }
   }
 
   function rpc(type, method, args) {
@@ -39,7 +76,7 @@ export function buildBridgeClientSource({ sessionId }) {
       };
       if (method !== undefined && method !== null) msg.method = method;
       try {
-        parent.postMessage(msg, '*');
+        postToParent(msg);
       } catch (err) {
         delete pending[id];
         reject(err);
@@ -112,21 +149,47 @@ export function buildBridgeClientSource({ sessionId }) {
     }
   });
 
-  // --- TavernHelper surface (th.call) ---
-  var thMethods = [
-    'getChatMessages', 'setChatMessages', 'setChatMessage', 'getCurrentMessageId',
-    'getVariables', 'replaceVariables', 'updateVariablesWith', 'insertOrAssignVariables',
-    'insertVariables', 'deleteVariable', 'getLorebookEntries', 'setLorebookEntries',
-    'triggerSlash', 'formatAsTavernRegexedString'
-  ];
+  // --- TavernHelper surface (th.call) — names from BridgeProtocol.TH_CALL_METHODS ---
+  var thMethods = ${thMethodsJson};
   var TavernHelper = {};
   thMethods.forEach(function(name) {
+    // Special-case: function updaters cannot be structured-cloned over postMessage.
+    // Apply client-side: getVariables → updater(current) → replaceVariables.
+    if (name === 'updateVariablesWith') {
+      var updateVariablesWithBridge = function(updater, option) {
+        if (typeof updater !== 'function') {
+          return Promise.reject(Object.assign(
+            new Error(
+              'updateVariablesWith over bridge requires a function updater ' +
+              '(applied client-side via getVariables + replaceVariables)'
+            ),
+            { code: 'non_serializable_updater' }
+          ));
+        }
+        var opt = option || { type: 'chat' };
+        return rpc('th.call', 'getVariables', [opt]).then(function(current) {
+          var result = updater(current);
+          function commit(next) {
+            return rpc('th.call', 'replaceVariables', [next, opt]).then(function() {
+              return next;
+            });
+          }
+          if (result && typeof result.then === 'function') {
+            return result.then(commit);
+          }
+          return commit(result);
+        });
+      };
+      TavernHelper.updateVariablesWith = updateVariablesWithBridge;
+      window.updateVariablesWith = updateVariablesWithBridge;
+      return;
+    }
     var fn = rpcCall('th.call', name);
     TavernHelper[name] = fn;
     window[name] = fn;
   });
 
-  // --- Event API ---
+  // --- Event API (EventBus is fully exposed under iframe mode — no event-name allowlist) ---
   var listenerSeq = 0;
   function bindEvent(type) {
     return function(eventName, listener) {
@@ -150,7 +213,6 @@ export function buildBridgeClientSource({ sessionId }) {
   function eventOn(eventName, listener) { return bindEvent('event.on')(eventName, listener); }
   function eventOnce(eventName, listener) { return bindEvent('event.once')(eventName, listener); }
   function eventRemoveListener(eventName, listener) {
-    // Best-effort: remove by function identity among local handlers
     var ids = Object.keys(cbHandlers);
     for (var i = 0; i < ids.length; i++) {
       if (cbHandlers[ids[i]] === listener) {
@@ -172,34 +234,29 @@ export function buildBridgeClientSource({ sessionId }) {
   window.eventEmit = eventEmit;
   window.eventRemoveListener = eventRemoveListener;
 
-  // --- Mvu surface ---
-  var Mvu = {
-    getMvuData: rpcCall('mvu.call', 'getMvuData'),
-    replaceMvuData: rpcCall('mvu.call', 'replaceMvuData'),
-    parseMessage: rpcCall('mvu.call', 'parseMessage'),
-    isDuringExtraAnalysis: function() {
-      // sync-friendly: cache last known; first call returns promise — cards usually call getMvuData
-      return false;
-    },
-    events: {}
-  };
-  // Populate events map asynchronously once
+  // --- Mvu surface (use window.Mvu / window.parentMvu — not parent.Mvu under opaque sandbox) ---
+  var mvuMethods = ${mvuMethodsJson};
+  var Mvu = { events: {} };
+  mvuMethods.forEach(function(name) {
+    if (name === 'isDuringExtraAnalysis') {
+      // Prefer sync false for cards that call without await; still RPC for accuracy when awaited.
+      Mvu.isDuringExtraAnalysis = function() {
+        return false;
+      };
+      return;
+    }
+    Mvu[name] = rpcCall('mvu.call', name);
+  });
   rpc('mvu.call', 'events', []).then(function(ev) {
     if (ev && typeof ev === 'object') {
       Mvu.events = ev;
     }
   }).catch(function() {});
   window.Mvu = Mvu;
-  // parent.Mvu facade so cards that read parent.Mvu still hit the bridge surface
-  try {
-    if (typeof parent !== 'undefined' && parent !== window) {
-      // Cannot assign onto real parent when cross-origin; ignore.
-    }
-  } catch (_) {}
-  // Explicit stub for cards that expect a local parent.Mvu shape via our injected name
+  // Cards should use Mvu / parentMvu — raw parent.Mvu cannot be assigned cross-origin.
   window.parentMvu = Mvu;
 
-  // --- SillyTavern.getContext stub note: getContext stays parent-only for P2 PR-10 ---
+  // --- SillyTavern.getContext stub (P2 fields land in PR-10) ---
   window.SillyTavern = {
     getContext: function() {
       return {
@@ -210,17 +267,52 @@ export function buildBridgeClientSource({ sessionId }) {
 
   window.TavernHelper = TavernHelper;
 
-  // --- Storage (namespaced on parent) ---
+  // --- Storage ---
+  // Async RPC surface (authoritative, namespaced on parent).
   var bridgeStorage = {
     getItem: function(key) { return rpc('storage', 'getItem', [String(key)]); },
     setItem: function(key, value) { return rpc('storage', 'setItem', [String(key), String(value)]); },
     removeItem: function(key) { return rpc('storage', 'removeItem', [String(key)]); },
     clear: function() { return rpc('storage', 'clear', []); }
   };
-  // Prefer bridge storage when opaque origin blocks real localStorage
+  window.__conclaveBridgeStorage = bridgeStorage;
+
+  // Best-effort sync in-memory facade for scripts that expect sync localStorage.
+  // Writes fire-and-forget to bridge; reads are local-only until hydrated.
+  // Under opaque sandbox, real localStorage throws — we try to shadow it.
+  var mem = Object.create(null);
+  var syncFacade = {
+    get length() { return Object.keys(mem).length; },
+    key: function(i) { return Object.keys(mem)[Number(i)] || null; },
+    getItem: function(key) {
+      var k = String(key);
+      return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null;
+    },
+    setItem: function(key, value) {
+      var k = String(key);
+      mem[k] = String(value);
+      bridgeStorage.setItem(k, mem[k]).catch(function() {});
+    },
+    removeItem: function(key) {
+      var k = String(key);
+      delete mem[k];
+      bridgeStorage.removeItem(k).catch(function() {});
+    },
+    clear: function() {
+      mem = Object.create(null);
+      bridgeStorage.clear().catch(function() {});
+    }
+  };
   try {
-    window.__conclaveBridgeStorage = bridgeStorage;
-  } catch (_) {}
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      enumerable: true,
+      get: function() { return syncFacade; }
+    });
+  } catch (_) {
+    // defineProperty may fail; scripts can use __conclaveBridgeStorage (async).
+    window.__conclaveLocalStorageFacade = syncFacade;
+  }
 
   // --- diag ---
   window.__conclaveBridgeLog = function() {
@@ -230,14 +322,14 @@ export function buildBridgeClientSource({ sessionId }) {
 
   window.__conclaveBridgeReady = true;
   try {
-    parent.postMessage({
+    postToParent({
       v: 1,
       id: nextId(),
       sessionId: SESSION_ID,
       type: 'diag',
       method: 'log',
       args: ['bridge_client_ready']
-    }, '*');
+    });
   } catch (_) {}
 })();
 `;

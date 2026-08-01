@@ -74,12 +74,18 @@ function thScriptToModuleHtml(scriptPart, runId) {
  *   bodyHtml?: string,
  *   scripts?: Array<{ src?: string, type?: string, content?: string }>,
  *   thScripts?: Array<{ content?: string, name?: string, index?: number }>,
+ *   parentOrigin?: string,
  * }} opts
  * @returns {string}
  */
 export function buildCardSrcdoc(opts) {
   const sessionId = String(opts.sessionId || 'default');
-  const bridge = buildBridgeClientSource({ sessionId });
+  const parentOrigin =
+    opts.parentOrigin ||
+    (typeof globalThis !== 'undefined' && globalThis.location
+      ? globalThis.location.origin
+      : '*');
+  const bridge = buildBridgeClientSource({ sessionId, parentOrigin });
   const headHtml = String(opts.headHtml || '');
   const bodyHtml = String(opts.bodyHtml || '');
   const scripts = Array.isArray(opts.scripts) ? opts.scripts : [];
@@ -87,9 +93,21 @@ export function buildCardSrcdoc(opts) {
   const runId = Date.now();
 
   const inlineScripts = scripts.map(scriptPartToHtml).join('\n');
+  // Module TH scripts: inject storage alias prelude so localStorage name binds
+  // to the bridge facade (sync in-memory + async parent namespace).
   const thHtml = thScripts
     .filter((s) => String(s?.content || '').trim())
-    .map((s) => thScriptToModuleHtml(s, runId))
+    .map((s) => {
+      // Prefer shadowed sync facade (or real localStorage under same-origin).
+      // Async __conclaveBridgeStorage is fallback only — not sync-compatible.
+      const withPrelude = {
+        ...s,
+        content:
+          `const localStorage = window.localStorage || window.__conclaveLocalStorageFacade || window.__conclaveBridgeStorage;\n` +
+          `${s.content || ''}`,
+      };
+      return thScriptToModuleHtml(withPrelude, runId);
+    })
     .join('\n');
 
   return `<!DOCTYPE html>
@@ -115,6 +133,8 @@ ${thHtml}
  * @property {Document} [document]
  * @property {string} [className]
  * @property {string} [title]
+ * @property {() => void} [onBeforeSrcdoc]  // e.g. bridgeHost.resetFrameListeners on remount
+ * @property {string} [parentOrigin]
  */
 
 /**
@@ -135,6 +155,13 @@ export function createCardFrame(options) {
   const container = options.container;
   const allowSameOrigin = options.allowSameOrigin;
   const sandbox = resolveSandboxAttribute(allowSameOrigin);
+  const onBeforeSrcdoc =
+    typeof options.onBeforeSrcdoc === 'function' ? options.onBeforeSrcdoc : null;
+  const parentOrigin =
+    options.parentOrigin ||
+    (typeof globalThis !== 'undefined' && globalThis.location
+      ? globalThis.location.origin
+      : '*');
 
   /** @type {HTMLIFrameElement} */
   const iframe = doc.createElement('iframe');
@@ -150,9 +177,21 @@ export function createCardFrame(options) {
   container.innerHTML = '';
   container.appendChild(iframe);
 
-  /** @type {{ sessionId: string, headHtml: string, bodyHtml: string, scripts: object[], thScripts: object[] }|null} */
+  /** @type {{ sessionId: string, headHtml: string, bodyHtml: string, scripts: object[], thScripts: object[], parentOrigin?: string }|null} */
   let lastMount = null;
   let destroyed = false;
+
+  function applySrcdoc(mountState) {
+    try {
+      onBeforeSrcdoc?.();
+    } catch {
+      /* ignore */
+    }
+    iframe.srcdoc = buildCardSrcdoc({
+      ...mountState,
+      parentOrigin,
+    });
+  }
 
   /**
    * @param {{
@@ -174,7 +213,7 @@ export function createCardFrame(options) {
         ? mountOpts.thScripts
         : lastMount?.thScripts || [],
     };
-    iframe.srcdoc = buildCardSrcdoc(lastMount);
+    applySrcdoc(lastMount);
   }
 
   /**
@@ -193,7 +232,7 @@ export function createCardFrame(options) {
     } else {
       lastMount.thScripts = Array.isArray(thScripts) ? thScripts : [];
     }
-    iframe.srcdoc = buildCardSrcdoc(lastMount);
+    applySrcdoc(lastMount);
   }
 
   /**

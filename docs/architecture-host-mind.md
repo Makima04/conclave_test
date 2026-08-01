@@ -805,12 +805,17 @@ flowchart LR
 | 项 | 决策 |
 |----|------|
 | **默认 sandbox** | `sandbox="allow-scripts"` **不含** `allow-same-origin` |
-| **存储** | 一律走 BridgeProtocol `storage`（parent 侧 `createScopedLocalStorage` 命名空间）；不依赖 frame `localStorage` |
-| **TH / MVU / event** | frame→parent RPC（allowlist）；callback 经 `event.cb` parent→frame |
+| **存储** | 一律走 BridgeProtocol `storage`（parent 侧 `createScopedLocalStorage` 命名空间）。Client 暴露 `__conclaveBridgeStorage`（async RPC）+ best-effort sync in-memory facade（`localStorage` shadow）；**同步 parity 有限**（opaque 下真实 `localStorage` 会抛）。`iframe_same_origin=1` 时若不 shadow 成功可能触达**未命名空间** real storage（residual） |
+| **TH / MVU / event** | frame→parent RPC（allowlist）；callback 经 `event.cb` parent→frame。**EventBus 事件名未 allowlist**——iframe 模式卡可 on/emit 宿主 bus 上任意频道（与同窗 TH 一致；威胁模型：本地可信卡） |
+| **`updateVariablesWith`** | 函数 updater **不能**经 `postMessage` 结构化克隆；bridge client **在 frame 内** `getVariables → updater(current) → replaceVariables`。Host 若直接收到非函数 args → `non_serializable_updater` |
+| **postMessage origin** | frame→parent：client 嵌入 `parentOrigin`（`location.origin`）作 targetOrigin，失败回退 `*`。parent→opaque frame：仍需 `*`。Host **拒绝** `getFrameWindow()==null` 或 `event.source !== frameWin` 的请求 |
+| **srcdoc remount** | 每次 `CardFrame` 写 `srcdoc` 前调用 `bridgeHost.resetFrameListeners()`，避免 EventBus 监听泄漏 |
 | **回退 flag** | `conclave:feature:iframe_same_origin=1` → `sandbox="allow-scripts allow-same-origin"` |
 | **Residual risk（same-origin flag）** | frame 与 parent 同源，恶意卡可触达 parent DOM / 未命名空间 storage / 宿主 globals；**仅**在默认 opaque 隔离导致夹具卡无法运行时启用；不得作为多租户默认 |
 | **主开关** | `conclave:feature:card_iframe`（localStorage `'1'` 或 `?card_iframe=1`）；**默认 off**，同窗路径零行为变化 |
 | **CSS 隔离** | flag on 时 head 节点与卡脚本不进入 parent `document.head` / parent body scripts |
+| **IframeAdapter** | `createIframeAdapter` 已实现并单测，供 same-origin 下 CapabilityRegistry 写入 frame window；**PR-09 runtime 路径**以 bridge client 注入为主，parent 仍用 `WindowAdapter`。opaque 路径不依赖 IframeAdapter |
+| **Mvu 表面** | 使用 `window.Mvu` / `window.parentMvu`；opaque 下 **不可**写 `parent.Mvu` |
 
 #### 5.4 ExtensionManager（P2 最小）
 
@@ -1423,7 +1428,7 @@ fn initial_game_state(card: &CardData) -> Value {
 | PR-05.5 Vitest harness | ✅ | `vitest` · `npm test` · commit `e4a12ba` |
 | PR-06 Display RenderPipeline | ✅ | `st-host/render/*` · `InitResponse.regex_scripts` + `session_epoch` · commit `9c86e11` |
 | PR-08 ScriptRunner harden | ✅ | `st-host/ScriptRunner.js` abort/namespace/teardown |
-| PR-09 Card iframe + BridgeProtocol v1 | ✅ | `st-host/isolation/*` · flag `card_iframe` default off · Sandbox ADR |
+| PR-09 Card iframe + BridgeProtocol v1 | ✅ | `st-host/isolation/*` · flag `card_iframe` default off · Sandbox ADR · review fixes: remount listener reset, updateVariablesWith client-side apply, source checks |
 | **PR-07** Chat 同步 | 🔲 | **下一步** |
 | PR-08…PR-13 | 🔲 | 未开始 |
 

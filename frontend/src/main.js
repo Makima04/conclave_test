@@ -1338,6 +1338,7 @@ function renderCardHtml(htmlContent, target) {
  */
 function renderCardHtmlIframe(htmlContent, target) {
   ensureRuntime();
+  // BridgeHost first (listener ready); requests rejected until frame window is bound.
   ensureBridgeHost();
 
   const { headNodes, bodyHtml, scripts } = extractHtmlParts(htmlContent);
@@ -1352,6 +1353,14 @@ function renderCardHtmlIframe(htmlContent, target) {
     cardFrame = createCardFrame({
       container: target,
       allowSameOrigin: isIframeSameOriginEnabled(),
+      // Clear EventBus subscriptions on every srcdoc rebuild (remount / TH inject).
+      onBeforeSrcdoc: () => {
+        try {
+          bridgeHost?.resetFrameListeners?.();
+        } catch {
+          /* ignore */
+        }
+      },
     });
   }
 

@@ -4,6 +4,15 @@
  * Listens for postMessage from the card iframe, enforces the method allowlist,
  * and invokes runtime surfaces (TH / MVU / EventBus / scoped storage).
  *
+ * Security notes:
+ * - Requests are rejected while no frame window is bound, and when
+ *   `event.source !== frameWin` once bound.
+ * - Parent→opaque-frame posts still use targetOrigin `*` (browser limitation for
+ *   unique opaque origins / srcdoc). Frame→parent uses embedded parent origin
+ *   when available (see bridgeClientSource).
+ * - EventBus channel names are not allowlisted: under iframe mode the card may
+ *   on/emit any host EventBus event (documented residual; see architecture ADR).
+ *
  * @module st-host/isolation/BridgeHost
  */
 
@@ -24,6 +33,8 @@ import { createScopedLocalStorage } from '../../shared/scopedStorage.js';
  * @property {() => Window|null} [getFrameWindow]
  * @property {(level: string, message: string, meta?: object) => void} [log]
  * @property {Window} [targetWindow]  // where to attach message listener (default: window)
+ * @property {boolean} [allowGlobalFallback]  // opt-in: th.call falls back to globalThis
+ * @property {boolean} [requireFrameSource]  // default true: reject when frame unbound / source mismatch
  */
 
 /**
@@ -47,6 +58,8 @@ export function createBridgeHost(options) {
     typeof options.getFrameWindow === 'function'
       ? options.getFrameWindow
       : () => null;
+  const allowGlobalFallback = !!options.allowGlobalFallback;
+  const requireFrameSource = options.requireFrameSource !== false;
   const log =
     options.log ||
     ((level, message, meta) => {
@@ -64,6 +77,8 @@ export function createBridgeHost(options) {
   /** @type {((event: MessageEvent) => void)|null} */
   let onMessage = null;
   let tornDown = false;
+  /** Bumped on resetFrameListeners so late callbacks from old gens are ignored. */
+  let frameGeneration = 0;
 
   /**
    * @param {Window|null|undefined} frameWin
@@ -72,6 +87,8 @@ export function createBridgeHost(options) {
   function postToFrame(frameWin, envelope) {
     if (!frameWin || typeof frameWin.postMessage !== 'function') return;
     try {
+      // Residual: opaque srcdoc frames require '*'; same-origin frames could use
+      // a concrete origin, but we keep '*' for both paths for simplicity.
       frameWin.postMessage(envelope, '*');
     } catch (error) {
       log('error', 'postToFrame failed', { error: String(error) });
@@ -86,11 +103,34 @@ export function createBridgeHost(options) {
     const source = event.source;
     if (source && typeof source.postMessage === 'function') {
       try {
-        source.postMessage(response, '*');
-      } catch (error) {
-        log('error', 'reply failed', { error: String(error) });
+        // Prefer event.origin when it is a concrete origin; fall back to '*'.
+        const targetOrigin =
+          event.origin && event.origin !== 'null' ? event.origin : '*';
+        source.postMessage(response, targetOrigin);
+      } catch {
+        try {
+          source.postMessage(response, '*');
+        } catch (err2) {
+          log('error', 'reply failed', { error: String(err2) });
+        }
       }
     }
+  }
+
+  /**
+   * Stop all parent EventBus subscriptions registered for the current frame.
+   * Call on every srcdoc remount so stale event.cb handlers cannot leak.
+   */
+  function resetFrameListeners() {
+    frameGeneration += 1;
+    for (const record of listenerRegistry.values()) {
+      try {
+        record.stop?.();
+      } catch {
+        /* ignore */
+      }
+    }
+    listenerRegistry.clear();
   }
 
   /**
@@ -98,21 +138,39 @@ export function createBridgeHost(options) {
    * @param {unknown[]} args
    */
   async function dispatchThCall(method, args) {
+    // Functions cannot cross postMessage. Client applies updateVariablesWith
+    // via getVariables+replaceVariables; reject any direct host invocation.
+    if (method === 'updateVariablesWith') {
+      const updater = args[0];
+      if (typeof updater !== 'function') {
+        throw Object.assign(
+          new Error(
+            'updateVariablesWith: function updaters cannot cross postMessage; ' +
+              'bridge client applies them client-side (getVariables → updater → replaceVariables)',
+          ),
+          { code: 'non_serializable_updater' },
+        );
+      }
+    }
+
     const surfaces = getSurfaces() || {};
     const th = surfaces.tavernHelper || {};
     const fn = th[method];
-    if (typeof fn !== 'function') {
-      // Fall back to parent globals (WindowAdapter path still defines them).
+    if (typeof fn === 'function') {
+      return fn.apply(th, args);
+    }
+
+    if (allowGlobalFallback) {
       const globalFn =
         typeof globalThis !== 'undefined' ? globalThis[method] : undefined;
       if (typeof globalFn === 'function') {
         return globalFn.apply(globalThis, args);
       }
-      throw Object.assign(new Error(`th.call method unavailable: ${method}`), {
-        code: 'method_unavailable',
-      });
     }
-    return fn.apply(th, args);
+
+    throw Object.assign(new Error(`th.call method unavailable: ${method}`), {
+      code: 'method_unavailable',
+    });
   }
 
   /**
@@ -166,9 +224,13 @@ export function createBridgeHost(options) {
           : eventBus.on?.bind(eventBus) || eventBus.eventOn?.bind(eventBus);
       if (typeof subscribe !== 'function') return;
 
-      const frameWin = getFrameWindow();
+      // Capture generation at subscribe time; resolve frame window at fire time
+      // so remounts do not post to a detached contentWindow.
+      const gen = frameGeneration;
       const handler = (...cbArgs) => {
-        postToFrame(frameWin, {
+        if (gen !== frameGeneration) return;
+        const liveFrame = getFrameWindow();
+        postToFrame(liveFrame, {
           v: BRIDGE_PROTOCOL_VERSION,
           id: `cb_${listenerId}_${Date.now()}`,
           sessionId: getSessionId(),
@@ -242,7 +304,6 @@ export function createBridgeHost(options) {
       return undefined;
     }
     if (type === 'mount') {
-      // mount is parent→frame; frame should not invoke these. Reject.
       throw Object.assign(new Error('mount is parent→frame only'), {
         code: 'method_not_allowed',
       });
@@ -274,11 +335,18 @@ export function createBridgeHost(options) {
       return;
     }
 
-    // Optional source check when we know the frame window.
     const frameWin = getFrameWindow();
-    if (frameWin && event.source && event.source !== frameWin) {
-      // Could be another frame; ignore if we have a bound frame.
-      return;
+    if (requireFrameSource) {
+      // Reject until a frame is bound (avoids accepting traffic before CardFrame exists).
+      if (!frameWin) {
+        log('debug', 'reject: no frame window bound', { id: data.id });
+        return;
+      }
+      // Always require source match when bound (including when source is null/falsy).
+      if (event.source !== frameWin) {
+        log('debug', 'reject: event.source !== frame window', { id: data.id });
+        return;
+      }
     }
 
     const validated = validateRequest(data);
@@ -324,6 +392,7 @@ export function createBridgeHost(options) {
       return;
     }
     if (onMessage) return;
+    tornDown = false;
     onMessage = (event) => {
       void handleMessage(event);
     };
@@ -340,14 +409,7 @@ export function createBridgeHost(options) {
       }
     }
     onMessage = null;
-    for (const record of listenerRegistry.values()) {
-      try {
-        record.stop?.();
-      } catch {
-        /* ignore */
-      }
-    }
-    listenerRegistry.clear();
+    resetFrameListeners();
   }
 
   /**
@@ -367,12 +429,29 @@ export function createBridgeHost(options) {
     });
   }
 
+  /**
+   * @returns {number}
+   */
+  function getListenerCount() {
+    return listenerRegistry.size;
+  }
+
+  /**
+   * @returns {number}
+   */
+  function getFrameGeneration() {
+    return frameGeneration;
+  }
+
   start();
 
   return {
     start,
     teardown,
     sendMount,
+    resetFrameListeners,
+    getListenerCount,
+    getFrameGeneration,
     /** @internal test helper */
     _handleMessage: handleMessage,
     _dispatch: dispatch,
