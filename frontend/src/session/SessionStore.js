@@ -27,6 +27,8 @@ function createEmptySnapshot() {
     requirements: null,
     runtime: null,
     capabilities: null,
+    /** Mind snapshot when feature flag on; always null when Mind off (PR-11). */
+    mind: null,
   };
 }
 
@@ -201,6 +203,22 @@ export function createSessionStore() {
     snapshot.requirements = null;
     snapshot.runtime = null;
     snapshot.capabilities = null;
+    snapshot.mind = null;
+  }
+
+  /**
+   * PR-11: Mind snapshot (null when feature flag off).
+   * @returns {object|null}
+   */
+  function getMind() {
+    return snapshot.mind;
+  }
+
+  /**
+   * @param {object|null} mind
+   */
+  function setMind(mind) {
+    snapshot.mind = mind == null ? null : mind;
   }
 
   /**
@@ -277,6 +295,8 @@ export function createSessionStore() {
     setCapabilities,
     applyInitPayload,
     resetCardData,
+    getMind,
+    setMind,
     getMessages,
     getMvu,
     appendMessage,

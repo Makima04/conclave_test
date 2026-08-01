@@ -30,6 +30,8 @@ import {
 } from './st-host/render/index.js';
 import { createPorts } from './bridge/createPorts.js';
 import { MVU_EVENTS } from './bridge/stEventMap.js';
+import { createMindService, isMindEnabled } from './mind/MindService.js';
+import { createMindDebugPanel } from './mind/MindDebugPanel.js';
 
 const OPENING_SWIPE_REFRESH_DELAY_MS = 650;
 
@@ -40,6 +42,34 @@ const store = createSessionStore();
 const ports = createPorts({
   getRuntime: () => store.getRuntime(),
 });
+
+/**
+ * Mind MVP (PR-11): only when flag on. Flag off → mind null, no injection key, no panel.
+ * Mind uses ports only — never imports st-host concrete APIs.
+ */
+const mindEnabled = isMindEnabled();
+/** @type {ReturnType<typeof createMindDebugPanel> | null} */
+let mindDebugPanel = null;
+/** @type {ReturnType<typeof createMindService> | null} */
+const mind = mindEnabled
+  ? createMindService({
+      transcript: ports.transcript,
+      promptInjection: ports.promptInjection,
+      lifecycle: ports.lifecycle,
+      diagnostics: ports.diagnostics,
+      onSnapshot(snap) {
+        store.setMind(snap);
+        mindDebugPanel?.refresh();
+      },
+    })
+  : null;
+// Snapshot stays null until Mind emits (and always null when flag off).
+store.setMind(null);
+if (mindEnabled && mind) {
+  mindDebugPanel = createMindDebugPanel({
+    getSnapshot: () => mind.getSnapshot() ?? store.getMind(),
+  });
+}
 
 /**
  * UI / host-chrome state only (not session authority).
@@ -172,7 +202,11 @@ function renderShell() {
   shell.renderShell({
     cardName: store.getCardName() || 'Conclave',
     worldbooks: store.getImportedWorldbooks(),
+    mindEnabled: !!mind,
   });
+  if (mind && mindDebugPanel) {
+    mindDebugPanel.refresh();
+  }
 }
 
 function showLoading() {
@@ -1454,10 +1488,11 @@ kernel = createSessionKernel({
   },
 });
 
-// Expose ports for debug / future Mind bootstrap (not a public ST API).
+// Expose ports / mind for debug (not a public ST API).
 if (typeof window !== 'undefined') {
   window.__conclavePorts = ports;
   window.__conclaveKernel = kernel;
+  window.__conclaveMind = mind;
 }
 
 window.addEventListener('error', event => {

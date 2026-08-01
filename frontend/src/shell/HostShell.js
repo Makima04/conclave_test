@@ -40,12 +40,16 @@ export function createHostShell({
     return document.getElementById('st-diagnostics-strip');
   }
 
+  function getMindDebug() {
+    return document.getElementById('st-mind-debug');
+  }
+
   function getWorldbookList() {
     return document.getElementById('st-worldbook-list');
   }
 
   /**
-   * @param {{ cardName?: string, worldbooks?: Array<{ id: number, name?: string, entry_count?: number, is_current?: boolean }> }} [viewModel]
+   * @param {{ cardName?: string, worldbooks?: Array<{ id: number, name?: string, entry_count?: number, is_current?: boolean }>, mindEnabled?: boolean }} [viewModel]
    */
   function renderShell(viewModel = {}) {
     const cardName = viewModel.cardName || 'Conclave';
@@ -71,6 +75,7 @@ export function createHostShell({
         </div>
       </header>
       <div id="st-diagnostics-strip" class="st-diagnostics-strip" hidden aria-live="polite"></div>
+      ${viewModel.mindEnabled ? '<div id="st-mind-debug" class="st-mind-debug" hidden aria-live="polite"></div>' : ''}
       <div class="st-workspace">
         <aside class="st-worldbook-sidebar">
           <div class="st-sidebar-heading">已导入世界书</div>
@@ -293,5 +298,6 @@ export function createHostShell({
     getUserInput,
     getSendButton,
     getDiagnosticsStrip,
+    getMindDebug,
   };
 }

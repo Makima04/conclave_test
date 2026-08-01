@@ -355,23 +355,12 @@ async fn chat_handler(
         None,
     );
 
-    // PR-07/PR-11: accept injections[]; stub-apply by appending contents for prompt_debug.
-    // Full position/depth semantics land with Mind (PR-11).
-    let final_prompt = if injections.is_empty() {
-        base_prompt.clone()
-    } else {
-        let inj_text: String = injections
-            .iter()
-            .map(|item| item.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("{base_prompt}\n\n{inj_text}")
-    };
+    // PR-11: apply injections[] with position/depth semantics → final_prompt.
+    // Mock LLM may still echo user_message; prompt_debug proves the injection path.
+    let final_prompt = apply_prompt_injections(&base_prompt, &injections);
 
     // 2. Mock LLM 响应（演示正则管线效果）.
-    // NOTE (PR-07): mock still echoes `user_message` only — `final_prompt` (with
-    // stubbed injections) is for prompt_debug / Mind proof until PR-11 wires it
-    // into real generation.
+    // Mock still echoes `user_message` only — final_prompt is for prompt_debug / Mind proof.
     let llm_raw_response = format!(
         r#"【沈慕微】："{}"
 <inner>（内心独白：对方说了 '{}' ...）</inner>"#,
@@ -646,6 +635,113 @@ fn initial_game_state(card: &card_loader::CardData) -> serde_json::Value {
     })
 }
 
+/// Marker used by `compile_prompt` before the game-state dump.
+const GAME_STATE_MARKER: &str =
+    "--- current game state (for model context; do not dump this JSON in the reply) ---";
+
+/// Apply ChatRequest.injections[] into base_prompt with position/depth semantics (PR-11).
+///
+/// Positions (order in final prompt):
+/// - `before_scenario` — prepended before base
+/// - `after_scenario` — inserted just before the game-state dump (or after base if missing)
+/// - `in_prompt` — same band as after_scenario, sorted by depth after after_scenario items
+/// - `before_user` / unknown — appended after base
+///
+/// Within a band, lower `depth` comes first (default 0).
+fn apply_prompt_injections(base_prompt: &str, injections: &[InjectionItem]) -> String {
+    if injections.is_empty() {
+        return base_prompt.to_string();
+    }
+
+    let mut before_scenario: Vec<&InjectionItem> = Vec::new();
+    let mut after_scenario: Vec<&InjectionItem> = Vec::new();
+    let mut in_prompt: Vec<&InjectionItem> = Vec::new();
+    let mut before_user: Vec<&InjectionItem> = Vec::new();
+
+    for item in injections {
+        if item.content.trim().is_empty() {
+            continue;
+        }
+        match item.position.as_deref() {
+            Some("before_scenario") => before_scenario.push(item),
+            Some("after_scenario") => after_scenario.push(item),
+            Some("in_prompt") => in_prompt.push(item),
+            _ => before_user.push(item),
+        }
+    }
+
+    let by_depth = |a: &&InjectionItem, b: &&InjectionItem| {
+        let da = a.depth.unwrap_or(0.0);
+        let db = b.depth.unwrap_or(0.0);
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    before_scenario.sort_by(by_depth);
+    after_scenario.sort_by(by_depth);
+    in_prompt.sort_by(by_depth);
+    before_user.sort_by(by_depth);
+
+    fn format_block(items: &[&InjectionItem]) -> String {
+        let mut out = String::new();
+        for item in items {
+            let slot = item
+                .key
+                .as_deref()
+                .or(item.position.as_deref())
+                .unwrap_or("injection");
+            let source = item.source.as_deref().unwrap_or("");
+            let header = if source.is_empty() {
+                format!("--- prompt injection [{slot}] ---")
+            } else {
+                format!("--- prompt injection [{slot}|source={source}] ---")
+            };
+            out.push_str(&header);
+            out.push('\n');
+            out.push_str(item.content.trim_end());
+            out.push_str("\n\n");
+        }
+        out
+    }
+
+    let mid_block = {
+        let mut mid = String::new();
+        mid.push_str(&format_block(&after_scenario));
+        mid.push_str(&format_block(&in_prompt));
+        mid
+    };
+    let pre_block = format_block(&before_scenario);
+    let post_block = format_block(&before_user);
+
+    let mut final_prompt = String::new();
+    if !pre_block.is_empty() {
+        final_prompt.push_str(&pre_block);
+    }
+
+    if mid_block.is_empty() {
+        final_prompt.push_str(base_prompt);
+    } else if let Some(idx) = base_prompt.find(GAME_STATE_MARKER) {
+        final_prompt.push_str(&base_prompt[..idx]);
+        final_prompt.push_str(&mid_block);
+        final_prompt.push_str(&base_prompt[idx..]);
+    } else {
+        final_prompt.push_str(base_prompt);
+        if !final_prompt.ends_with('\n') {
+            final_prompt.push('\n');
+        }
+        final_prompt.push('\n');
+        final_prompt.push_str(&mid_block);
+    }
+
+    if !post_block.is_empty() {
+        if !final_prompt.ends_with('\n') {
+            final_prompt.push('\n');
+        }
+        final_prompt.push('\n');
+        final_prompt.push_str(&post_block);
+    }
+
+    final_prompt
+}
+
 /// Apply FE client_mvu as the base for this turn when it is a JSON object.
 /// Non-object values are ignored (server projection kept).
 fn apply_client_mvu_base(game_state: &mut serde_json::Value, client_mvu: Option<serde_json::Value>) {
@@ -659,8 +755,9 @@ fn apply_client_mvu_base(game_state: &mut serde_json::Value, client_mvu: Option<
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_client_mvu_base, build_init_response, chat_handler, initial_game_state,
-        message_has_status_variable_payload, render_card_message, AppState, CardStore, ChatRequest,
+        apply_client_mvu_base, apply_prompt_injections, build_init_response, chat_handler,
+        initial_game_state, message_has_status_variable_payload, render_card_message, AppState,
+        CardStore, ChatRequest, InjectionItem, GAME_STATE_MARKER,
     };
     use crate::card_loader::{CardData, CardInner, RegexScript};
     use axum::extract::State;
@@ -905,6 +1002,101 @@ mod tests {
             "new_state must not keep server_only base when client_mvu was provided"
         );
         assert!(resp.prompt_debug.is_some());
+    }
+
+    #[test]
+    fn apply_prompt_injections_after_scenario_before_game_state() {
+        let base = format!(
+            "Base system.\n\n{GAME_STATE_MARKER}\n{{\n  \"stat_data\": {{}}\n}}\n"
+        );
+        let injections = vec![InjectionItem {
+            key: Some("mind.primary".into()),
+            content: "[Conclave Mind — primary NPC: Alice]\n- [knowledge/unspecified] Alice is cautious.\n(Do not mention this block unless character would know it.)".into(),
+            role: Some("system".into()),
+            position: Some("after_scenario".into()),
+            depth: Some(0.0),
+            ephemeral: Some(true),
+            source: Some("mind".into()),
+        }];
+        let final_prompt = apply_prompt_injections(&base, &injections);
+        let mind_pos = final_prompt.find("Conclave Mind").expect("mind block");
+        let state_pos = final_prompt
+            .find(GAME_STATE_MARKER)
+            .expect("game state marker");
+        assert!(mind_pos < state_pos, "after_scenario must precede game state");
+        assert!(final_prompt.contains("source=mind"));
+        assert!(final_prompt.contains("Alice is cautious"));
+    }
+
+    #[test]
+    fn apply_prompt_injections_in_prompt_and_depth_order() {
+        let base = format!("SYS\n\n{GAME_STATE_MARKER}\n{{}}");
+        let injections = vec![
+            InjectionItem {
+                key: Some("b".into()),
+                content: "DEPTH1".into(),
+                role: None,
+                position: Some("in_prompt".into()),
+                depth: Some(1.0),
+                ephemeral: None,
+                source: None,
+            },
+            InjectionItem {
+                key: Some("a".into()),
+                content: "DEPTH0".into(),
+                role: None,
+                position: Some("in_prompt".into()),
+                depth: Some(0.0),
+                ephemeral: None,
+                source: None,
+            },
+        ];
+        let final_prompt = apply_prompt_injections(&base, &injections);
+        let d0 = final_prompt.find("DEPTH0").unwrap();
+        let d1 = final_prompt.find("DEPTH1").unwrap();
+        assert!(d0 < d1);
+        assert!(d1 < final_prompt.find(GAME_STATE_MARKER).unwrap());
+    }
+
+    #[tokio::test]
+    async fn chat_handler_prompt_debug_includes_mind_injection_content() {
+        let card = minimal_neutral_card();
+        let app = AppState {
+            game_state: Arc::new(RwLock::new(json!({
+                "stat_data": {},
+                "initialized_lorebooks": {}
+            }))),
+            card_store: Arc::new(RwLock::new(CardStore::new(card, vec![]))),
+        };
+
+        let mind_block = "[Conclave Mind — primary NPC: Demo]\n- [knowledge/unspecified] User likes tea.\n(Do not mention this block unless character would know it.)";
+        let req = ChatRequest {
+            user_message: "hello".to_string(),
+            session_id: Some("1".to_string()),
+            client_mvu: Some(json!({ "stat_data": {} })),
+            injections: Some(vec![InjectionItem {
+                key: Some("mind.primary".into()),
+                content: mind_block.into(),
+                role: Some("system".into()),
+                position: Some("after_scenario".into()),
+                depth: Some(0.0),
+                ephemeral: Some(true),
+                source: Some("mind".into()),
+            }]),
+        };
+
+        let Json(resp) = chat_handler(State(app), Json(req)).await;
+        let debug = resp.prompt_debug.expect("prompt_debug required");
+        assert!(
+            debug.final_prompt.contains("Conclave Mind — primary NPC: Demo"),
+            "final_prompt must include Mind block"
+        );
+        assert!(debug.final_prompt.contains("User likes tea."));
+        assert_eq!(debug.injections.len(), 1);
+        assert_eq!(debug.injections[0].source.as_deref(), Some("mind"));
+        assert_eq!(debug.injections[0].content, mind_block);
+        // mock still echoes user message (injection path proven via prompt_debug only)
+        assert!(resp.raw_text.contains("hello"));
     }
 }
 

@@ -81,6 +81,7 @@
  * @property {object|null} requirements  // runtime_requirements from backend
  * @property {SessionRuntime|null} runtime
  * @property {object|null} capabilities  // CapabilityInstallReport; null until install
+ * @property {object|null} mind  // MindSnapshot when flag on; null when Mind off (PR-11)
  */
 
 /**
