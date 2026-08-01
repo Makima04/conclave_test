@@ -15,6 +15,12 @@ import { createHostShell } from './shell/HostShell.js';
 import { createSessionStore } from './session/SessionStore.js';
 import { createSessionKernel } from './session/SessionKernel.js';
 import { createWindowAdapter } from './st-host/isolation/GlobalAdapter.js';
+import {
+  isCardIframeEnabled,
+  isIframeSameOriginEnabled,
+  createCardFrame,
+  createBridgeHost,
+} from './st-host/isolation/index.js';
 import { createContextFactory } from './st-host/context/ContextFactory.js';
 import { createEventBus } from './st-host/context/EventBus.js';
 import {
@@ -94,8 +100,18 @@ const scriptRunner = createScriptRunner({
 });
 
 /**
+ * PR-09: optional card iframe + BridgeHost (flag `conclave:feature:card_iframe`).
+ * Default off — same-window ScriptRunner / MessageMount path unchanged.
+ * @type {ReturnType<typeof createCardFrame>|null}
+ */
+let cardFrame = null;
+/** @type {ReturnType<typeof createBridgeHost>|null} */
+let bridgeHost = null;
+
+/**
  * PR-08: MessageMount owns opening/message DOM for card-switch teardown.
  * renderHtmlInto reuses renderCardHtml (head nodes + inline scripts).
+ * When card_iframe is on, HTML/scripts mount into CardFrame inside the section.
  */
 const messageMount = createMessageMount({
   getRoot: () => shell.getMessageArea(),
@@ -198,13 +214,82 @@ function clearPendingRefreshTimers() {
   appState.pendingRefreshTimers.clear();
 }
 
+function destroyCardIframe() {
+  try {
+    bridgeHost?.teardown();
+  } catch (error) {
+    console.warn('[ConclaveSTHost] bridgeHost.teardown error:', error);
+  }
+  bridgeHost = null;
+  try {
+    cardFrame?.destroy();
+  } catch (error) {
+    console.warn('[ConclaveSTHost] cardFrame.destroy error:', error);
+  }
+  cardFrame = null;
+}
+
 function cleanupCardArtifacts() {
   // PR-08: ScriptRunner owns observer + artifact nodes + host document restore.
   scriptRunner.cleanupArtifacts();
+  // PR-09: drop iframe + bridge when isolation path was used.
+  destroyCardIframe();
 }
 
 function beginCardArtifactTracking() {
+  // Parent artifact observer only needed for same-window card CSS/scripts.
+  if (isCardIframeEnabled()) return;
   scriptRunner.beginCardArtifactTracking();
+}
+
+/**
+ * Ensure BridgeHost listens for frame RPCs against the live runtime surfaces.
+ */
+function ensureBridgeHost() {
+  if (bridgeHost) return bridgeHost;
+  bridgeHost = createBridgeHost({
+    getSessionId: () => String(store.getSessionEpoch() || 'default'),
+    getStorageNamespace: () => currentCardStorageNamespace(),
+    getSurfaces: () => store.getRuntime()?.surfaces || {},
+    getEventBus: () => store.getRuntime()?.eventBus || null,
+    getFrameWindow: () => cardFrame?.getContentWindow?.() ?? null,
+  });
+  return bridgeHost;
+}
+
+/**
+ * Serialize extractHtmlParts head nodes for iframe srcdoc (no parent head pollution).
+ * @param {Node[]} headNodes
+ * @returns {string}
+ */
+function serializeHeadNodesForFrame(headNodes) {
+  return (headNodes || [])
+    .filter(node => node && node.nodeType === Node.ELEMENT_NODE)
+    .filter(element => {
+      const tag = /** @type {Element} */ (element).tagName;
+      if (tag === 'SCRIPT') return false;
+      if (
+        tag === 'LINK' &&
+        /font-?awesome/i.test(
+          /** @type {Element} */ (element).getAttribute('href') || '',
+        )
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .map(element => {
+      try {
+        /** @type {Element} */ (element).setAttribute(
+          'data-conclave-card-head',
+          'true',
+        );
+      } catch {
+        /* ignore */
+      }
+      return /** @type {Element} */ (element).outerHTML || '';
+    })
+    .join('\n');
 }
 
 /**
@@ -1184,6 +1269,26 @@ function ensureRuntime() {
 
 async function executeTavernHelperScripts() {
   const scripts = store.getTavernHelperScripts();
+
+  // PR-09: when card iframe is on, TH modules run inside the frame (not parent).
+  if (isCardIframeEnabled()) {
+    ensureRuntime();
+    ensureBridgeHost();
+    if (cardFrame) {
+      cardFrame.setTavernHelperScripts(scripts);
+    }
+    const liveRuntime = store.getRuntime();
+    if (liveRuntime) {
+      const data = clone(liveRuntime.runtimeState.mvuData || {});
+      await liveRuntime.eventEmit?.(
+        window.Mvu?.events?.VARIABLE_UPDATE_ENDED || 'mag_variable_update_ended',
+        data,
+        data,
+      );
+    }
+    return;
+  }
+
   await scriptRunner.runTavernHelper(scripts, {
     ensureRuntime,
     getRuntime: () => store.getRuntime(),
@@ -1208,12 +1313,55 @@ function executeScripts(scripts) {
   });
 }
 
+/**
+ * Mount card HTML. Same-window (default) or CardFrame iframe when flag on.
+ * @param {string} htmlContent
+ * @param {HTMLElement} target
+ */
 function renderCardHtml(htmlContent, target) {
+  if (isCardIframeEnabled()) {
+    renderCardHtmlIframe(htmlContent, target);
+    return;
+  }
   const { headNodes, bodyHtml, scripts } = extractHtmlParts(htmlContent);
   installHeadNodes(headNodes);
   ensureRuntime();
   target.innerHTML = bodyHtml;
   executeScripts(scripts);
+}
+
+/**
+ * PR-09 iframe path: card HTML/CSS/scripts only inside sandboxed frame.
+ * Parent keeps Host chrome free of card CSS pollution.
+ * @param {string} htmlContent
+ * @param {HTMLElement} target
+ */
+function renderCardHtmlIframe(htmlContent, target) {
+  ensureRuntime();
+  ensureBridgeHost();
+
+  const { headNodes, bodyHtml, scripts } = extractHtmlParts(htmlContent);
+  const headHtml = serializeHeadNodesForFrame(headNodes);
+
+  if (!cardFrame || cardFrame.getContainer() !== target) {
+    try {
+      cardFrame?.destroy();
+    } catch {
+      /* ignore */
+    }
+    cardFrame = createCardFrame({
+      container: target,
+      allowSameOrigin: isIframeSameOriginEnabled(),
+    });
+  }
+
+  cardFrame.mount({
+    sessionId: String(store.getSessionEpoch() || 'default'),
+    headHtml,
+    bodyHtml,
+    scripts,
+    // TH scripts attached later via executeTavernHelperScripts → setTavernHelperScripts
+  });
 }
 
 /**
@@ -1387,6 +1535,7 @@ kernel = createSessionKernel({
       } catch (error) {
         console.warn('[ConclaveSTHost] messageMount.teardown error:', error);
       }
+      destroyCardIframe();
       appState.activeView = 'opening';
       appState.openingMessageNode = null;
     },

@@ -796,11 +796,21 @@ flowchart LR
 { v:1, id:string, ok:boolean, result?:any, error?:{ message:string, code:string } }
 ```
 
-- `CardFrame` sandbox **默认决策（PR-09 merge 前必须写入 ADR 小节）**：  
-  - 默认尝试 `sandbox="allow-scripts"` **无** `allow-same-origin`，存储一律走 bridge `storage`；  
-  - 若夹具卡失败，flag `conclave:feature:iframe_same_origin=1` 启用 `allow-scripts allow-same-origin` 并记 residual risk。  
-- 卡片脚本**只在 iframe**；parent 跑 Host chrome + ExtensionManager。  
-- `parent.Mvu`：bridge 预注入 iframe 侧 `parent` 假面或显式 `parent.Mvu` stub 转发，避免依赖同窗巧合。
+- `CardFrame` sandbox — **ADR resolved in PR-09**（见下方 **Sandbox ADR**）。  
+- 卡片脚本**只在 iframe**（flag `card_iframe` on）；parent 跑 Host chrome + ExtensionManager。  
+- `parent.Mvu`：bridge 预注入 iframe 侧 `Mvu` / `parentMvu` 转发，避免依赖同窗巧合。
+
+##### Sandbox ADR（PR-09 · Open Question #1 resolved）
+
+| 项 | 决策 |
+|----|------|
+| **默认 sandbox** | `sandbox="allow-scripts"` **不含** `allow-same-origin` |
+| **存储** | 一律走 BridgeProtocol `storage`（parent 侧 `createScopedLocalStorage` 命名空间）；不依赖 frame `localStorage` |
+| **TH / MVU / event** | frame→parent RPC（allowlist）；callback 经 `event.cb` parent→frame |
+| **回退 flag** | `conclave:feature:iframe_same_origin=1` → `sandbox="allow-scripts allow-same-origin"` |
+| **Residual risk（same-origin flag）** | frame 与 parent 同源，恶意卡可触达 parent DOM / 未命名空间 storage / 宿主 globals；**仅**在默认 opaque 隔离导致夹具卡无法运行时启用；不得作为多租户默认 |
+| **主开关** | `conclave:feature:card_iframe`（localStorage `'1'` 或 `?card_iframe=1`）；**默认 off**，同窗路径零行为变化 |
+| **CSS 隔离** | flag on 时 head 节点与卡脚本不进入 parent `document.head` / parent body scripts |
 
 #### 5.4 ExtensionManager（P2 最小）
 
@@ -1318,7 +1328,7 @@ fn initial_game_state(card: &CardData) -> Value {
 - 卡片脚本与 Host **同 origin 同 window**，恶意卡可触达 Host DOM/globals（cleanup 不能防主动攻击）。  
 - **适用场景**：本地用户导入 **自有/可信** 角色卡；**不**作为多租户不可信卡市场。  
 - **临时缓解**：远程 TH import 默认拒绝；scoped storage；artifact teardown；不在 Host 持久化密钥。  
-- **PR-09 门禁**：合并前必须有 **sandbox 决策记录**（默认无 same-origin vs flag 开启），写入 PR 描述并更新本文 Open Questions #1 为 resolved。
+- **PR-09 门禁**：✅ sandbox 决策已写入 §5.3 Sandbox ADR；Open Questions #1 resolved；默认 `allow-scripts` only，flag `iframe_same_origin` 为 residual-risk 回退。
 
 ---
 
@@ -1370,7 +1380,7 @@ fn initial_game_state(card: &CardData) -> Value {
 |-------|------|----------|------------|
 | **P0** | 拆分 + SessionKernel + CapabilityRegistry + 去苍玄硬编码 + 边界 lint | 状态机切换卡；requirements→install；无内核 cangxuan 默认；eslint 边界生效；**目标** `main.js` 精简 bootstrap（可延后） | **主体完成**（01a–05）；`main.js` 仍为编排中枢（未压到 150 行） |
 | **P1** | FE test harness + Display RenderPipeline + MessageMount + chat 同步 | vitest golden；StatusPlaceHolder 预通道；N 轮后 TH/DOM/Session 一致 | **进行中**：05.5+06 完成；**PR-07 未做** |
-| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | 未开始 |
+| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | **进行中**：PR-09 iframe+bridge+ADR ✅；PR-10 未做 |
 | **P3** | Mind MVP | mock 下 `prompt_debug`+面板含 Mind 块；flag off 无回归 | 未开始 |
 | **P4** | 真 LLM / 多会话 / 任意扩展 / E2E | 真模型；E2E 卡集 | 未开始 |
 
@@ -1412,6 +1422,8 @@ fn initial_game_state(card: &CardData) -> Value {
 | PR-05 Ports + EventBus + Lifecycle | ✅ | `bridge/*`, `st-host/context/EventBus.js` · commit `e4a12ba` |
 | PR-05.5 Vitest harness | ✅ | `vitest` · `npm test` · commit `e4a12ba` |
 | PR-06 Display RenderPipeline | ✅ | `st-host/render/*` · `InitResponse.regex_scripts` + `session_epoch` · commit `9c86e11` |
+| PR-08 ScriptRunner harden | ✅ | `st-host/ScriptRunner.js` abort/namespace/teardown |
+| PR-09 Card iframe + BridgeProtocol v1 | ✅ | `st-host/isolation/*` · flag `card_iframe` default off · Sandbox ADR |
 | **PR-07** Chat 同步 | 🔲 | **下一步** |
 | PR-08…PR-13 | 🔲 | 未开始 |
 
@@ -1517,10 +1529,11 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 **描述：** 统一 abort/namespace/teardown；与 MessageMount 协同。  
 **验收：** 连切 3 卡无残留节点/监听。
 
-### PR-09 — Card iframe + BridgeProtocol v1 · 🔲
+### PR-09 — Card iframe + BridgeProtocol v1 · ✅
 **依赖：** PR-08  
-**描述：** `IframeAdapter`；§5.3 方法表；flag `card_iframe`；**sandbox ADR 写入 PR**。  
-**验收：** 卡内 `getChatMessages` 通；parent 无卡 CSS 污染；默认 sandbox 策略已记录。
+**描述：** `IframeAdapter`；§5.3 方法表；flag `card_iframe`；**sandbox ADR 写入**（§5.3 + Open Q#1）。  
+**落地：** `st-host/isolation/{BridgeProtocol,BridgeHost,CardFrame,GlobalAdapter IframeAdapter,flags}`；`main.js` 在 `card_iframe=1` 时将卡 HTML/脚本挂入 iframe，parent 保留 Host chrome；默认 off 零行为变化。  
+**验收：** 卡内 `getChatMessages` 经 bridge；parent 无卡 CSS 污染；默认 sandbox=`allow-scripts` 已记录。
 
 ### PR-10 — getContext P2 字段 + ExtensionManager 骨架 · 🔲
 **依赖：** PR-09  
@@ -1576,7 +1589,7 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 
 > 六项关键决策已全部拍板（见 Key Decisions）。以下仅列非阻塞残留项；**不阻碍 P0 开工**。
 
-1. iframe `sandbox` 最终默认是否包含 `allow-same-origin`——**PR-09 合并前关闭**（见 §5.3 默认尝试无 same-origin + flag 回退）；本文不阻塞 P0。  
+1. ~~iframe `sandbox` 最终默认是否包含 `allow-same-origin`~~ — **RESOLVED PR-09**：默认 **无** `allow-same-origin`（仅 `allow-scripts`）；存储走 bridge；flag `conclave:feature:iframe_same_origin=1` 为 residual-risk 回退（见 §5.3 Sandbox ADR）。  
 2. Mind 记忆是否 P3 即持久化到 `backend/data/mind`——MVP 前端 only；PR-12 可选。  
 3. 是否 WASM 共享正则（A7）——P1 golden 稳定后再评估。
 
