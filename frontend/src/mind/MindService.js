@@ -81,6 +81,26 @@ export function createMindService({
     emitSnapshot();
   }
 
+  /**
+   * Session end (architecture §3.2 Mind onSessionEnd): drop memories + injection
+   * so the next card does not inherit prior Mind state. Keeps lifecycle listeners
+   * for the next sessionReady (unlike dispose()).
+   */
+  function resetSession() {
+    try {
+      promptInjection.clear(MIND_INJECTION_KEY);
+    } catch {
+      /* ignore */
+    }
+    store.clear();
+    lastInjection = null;
+    primary = createPrimaryNpc(primaryName || 'NPC');
+    diagnostics.log('info', 'mind.sessionTeardown', { active: 0 });
+    diagnostics.gauge('mind.active_memories', 0);
+    diagnostics.gauge('mind.injection_chars', 0);
+    emitSnapshot();
+  }
+
   async function onBeforeGenerate() {
     try {
       const memories = store.retrieve({
@@ -88,6 +108,19 @@ export function createMindService({
         maxChars: 2000,
         npcId: primary.id,
       });
+      // Skip empty shell injection to avoid polluting prompts before any extract.
+      if (!memories.length) {
+        try {
+          promptInjection.clear(MIND_INJECTION_KEY);
+        } catch {
+          /* ignore */
+        }
+        lastInjection = null;
+        diagnostics.gauge('mind.active_memories', 0);
+        diagnostics.gauge('mind.injection_chars', 0);
+        emitSnapshot();
+        return;
+      }
       const body = composePrompt(memories, primary);
       promptInjection.set(MIND_INJECTION_KEY, {
         content: body,
@@ -156,6 +189,7 @@ export function createMindService({
   unsubs.push(lifecycle.on('sessionReady', boot));
   unsubs.push(lifecycle.on('beforeGenerate', onBeforeGenerate));
   unsubs.push(lifecycle.on('afterGenerate', onAfterGenerate));
+  unsubs.push(lifecycle.on('sessionTeardown', resetSession));
 
   function dispose() {
     for (const off of unsubs) {
@@ -166,13 +200,7 @@ export function createMindService({
       }
     }
     unsubs.length = 0;
-    try {
-      promptInjection.clear(MIND_INJECTION_KEY);
-    } catch {
-      /* ignore */
-    }
-    store.clear();
-    lastInjection = null;
+    resetSession();
   }
 
   return {
@@ -185,6 +213,8 @@ export function createMindService({
       emitSnapshot();
     },
     extractAndStore,
+    /** Clear store + injection for card switch; keeps lifecycle listeners. */
+    resetSession,
     dispose,
     /** @internal */
     _injectionKey: MIND_INJECTION_KEY,

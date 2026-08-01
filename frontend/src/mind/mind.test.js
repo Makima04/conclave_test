@@ -13,6 +13,8 @@ import { createMemoryStore } from './MemoryStore.js'
 import { composePrompt } from './promptCompose.js'
 import { createMindService } from './MindService.js'
 import { createPorts } from '../bridge/createPorts.js'
+import { createSessionStore } from '../session/SessionStore.js'
+import { createSessionKernel } from '../session/SessionKernel.js'
 
 describe('isMindEnabled flag (default off)', () => {
   it('is false with empty storage and no query', () => {
@@ -272,5 +274,158 @@ describe('createMindService lifecycle', () => {
     expect(isMindEnabled({ localStorage: { getItem: () => null }, location: { search: '' } })).toBe(
       false,
     )
+  })
+
+  it('empty store: beforeGenerate does not set mind.primary injection', async () => {
+    const { getRuntime } = runtimeBundle()
+    const ports = createPorts({ getRuntime })
+    const mind = createMindService({
+      transcript: ports.transcript,
+      promptInjection: ports.promptInjection,
+      lifecycle: ports.lifecycle,
+      diagnostics: ports.diagnostics,
+      primaryName: 'Demo',
+    })
+    // Stale key from a prior turn must be cleared when store is empty.
+    ports.promptInjection.set('mind.primary', {
+      content: 'stale',
+      source: 'mind',
+      position: 'after_scenario',
+    })
+    await ports.lifecycle.emit('beforeGenerate', { userMessage: 'hi' })
+    expect(ports.promptInjection.list()).toHaveLength(0)
+    expect(mind.getLastInjection()).toBeNull()
+    mind.dispose()
+  })
+
+  it('sessionTeardown clears memories so next beforeGenerate has no stale injection', async () => {
+    const { getRuntime } = runtimeBundle()
+    const ports = createPorts({ getRuntime })
+    const mind = createMindService({
+      transcript: ports.transcript,
+      promptInjection: ports.promptInjection,
+      lifecycle: ports.lifecycle,
+      diagnostics: ports.diagnostics,
+      primaryName: 'CardA',
+    })
+    mind.getStore().insertMany([
+      {
+        npcId: 'primary',
+        text: 'Secret from card A that must not leak to card B.',
+        labels: ['knowledge/unspecified'],
+        scores: { knowledge: 0.9 },
+      },
+    ])
+    await ports.lifecycle.emit('beforeGenerate', { userMessage: 'a' })
+    expect(ports.promptInjection.list()).toHaveLength(1)
+    expect(ports.promptInjection.list()[0].content).toContain('Secret from card A')
+
+    await ports.lifecycle.emit('sessionTeardown', { cardName: 'CardA', toIdle: false })
+    expect(mind.getStore().activeCount()).toBe(0)
+    expect(mind.getLastInjection()).toBeNull()
+    expect(ports.promptInjection.list().find((i) => i.key === 'mind.primary')).toBeUndefined()
+
+    await ports.lifecycle.emit('sessionReady', { cardName: 'CardB' })
+    expect(mind.getPrimaryNpc().displayName).toBe('CardB')
+    await ports.lifecycle.emit('beforeGenerate', { userMessage: 'b' })
+    expect(ports.promptInjection.list()).toHaveLength(0)
+    expect(mind.getLastInjection()).toBeNull()
+    mind.dispose()
+  })
+})
+
+describe('Kernel + Mind integration (accept path)', () => {
+  function createMinimalRuntime(openingText = 'Opening') {
+    return {
+      runtimeState: {
+        mvuData: { stat_data: { turn: 0 } },
+        messages: [
+          {
+            message_id: 0,
+            role: 'assistant',
+            name: 'assistant',
+            is_hidden: false,
+            message: openingText,
+            data: { stat_data: { turn: 0 } },
+            extra: {},
+            swipe_id: 0,
+            swipes: [openingText],
+            rendered_swipes: [`<p>${openingText}</p>`],
+            swipes_data: [{ stat_data: { turn: 0 } }],
+            swipes_info: [{}],
+          },
+        ],
+      },
+    }
+  }
+
+  it('sendUserMessage: lastInjection content equals request + prompt_debug mind injection', async () => {
+    const store = createSessionStore()
+    store.setRuntime(createMinimalRuntime())
+    store.setPhase('running')
+
+    const ports = createPorts({ getRuntime: () => store.getRuntime() })
+    const mind = createMindService({
+      transcript: ports.transcript,
+      promptInjection: ports.promptInjection,
+      lifecycle: ports.lifecycle,
+      diagnostics: ports.diagnostics,
+      primaryName: 'Demo',
+    })
+    mind.getStore().insertMany([
+      {
+        npcId: 'primary',
+        text: 'User likes tea in the morning at the inn.',
+        labels: ['knowledge/unspecified'],
+        scores: { knowledge: 0.7 },
+      },
+    ])
+
+    /** @type {object|null} */
+    let capturedBody = null
+    const chatApi = async (body) => {
+      capturedBody = body
+      return {
+        raw_text: 'Assistant reply about tea.',
+        rendered_html: '<p>Assistant reply about tea.</p>',
+        new_state: { stat_data: { turn: 1 } },
+        prompt_debug: {
+          base_prompt: 'base',
+          final_prompt: `base\n${(body.injections || []).map((i) => i.content).join('\n')}`,
+          injections: body.injections || [],
+        },
+      }
+    }
+
+    const kernel = createSessionKernel({
+      store,
+      shell: { setDiagnostics: () => {} },
+      createRuntime: () => createMinimalRuntime(),
+      lifecycle: ports.lifecycle,
+      ports,
+      chatApi,
+      hooks: {
+        renderAssistantDisplay: (raw) => raw,
+      },
+    })
+
+    const data = await kernel.sendUserMessage('hello mind')
+    expect(capturedBody).toBeTruthy()
+    const mindInj = (capturedBody.injections || []).find(
+      (i) => i.source === 'mind' || i.key === 'mind.primary',
+    )
+    expect(mindInj).toBeTruthy()
+    expect(mind.getLastInjection()?.content).toBe(mindInj.content)
+    expect(mindInj.content).toContain('[Conclave Mind — primary NPC: Demo]')
+    expect(mindInj.content).toContain('User likes tea')
+
+    // Round-trip: mock API echoes injections into prompt_debug (backend contract).
+    const debugMind = (data.prompt_debug?.injections || []).find(
+      (i) => i.source === 'mind' || i.key === 'mind.primary',
+    )
+    expect(debugMind?.content).toBe(mind.getLastInjection()?.content)
+    expect(data.prompt_debug?.final_prompt).toContain('Conclave Mind')
+
+    mind.dispose()
   })
 })

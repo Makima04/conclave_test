@@ -1460,6 +1460,13 @@ kernel = createSessionKernel({
       appState.activeView = 'opening';
       appState.openingMessageNode = null;
       messageMount.teardown();
+      // Mind onSessionEnd safety net (also listens to lifecycle sessionTeardown).
+      // Ensures MemoryStore + injection do not bleed across card import/select.
+      if (mind) {
+        mind.resetSession();
+        store.setMind(null);
+        mindDebugPanel?.refresh();
+      }
     },
     renderShell,
     beginCardArtifactTracking,
