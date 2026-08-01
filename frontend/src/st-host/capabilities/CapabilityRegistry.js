@@ -64,6 +64,30 @@ export function createCapabilityRegistry({ catalog, adapter, strict = true } = {
   const teardowns = [];
 
   /**
+   * P2: soft-note capability ids provided by ExtensionManager without a full reinstall.
+   * Updates lastReport.byId / installed so diagnostics can surface extension caps.
+   *
+   * @param {string} extensionName
+   * @param {string} capabilityId
+   * @param {string} [status='ready']
+   */
+  function noteExtensionCaps(extensionName, capabilityId, status = 'ready') {
+    const id = String(capabilityId || '');
+    if (!id) return;
+    const detail = `extension:${extensionName || 'unknown'}`;
+    lastReport = {
+      ...lastReport,
+      byId: {
+        ...lastReport.byId,
+        [id]: { status, detail },
+      },
+      installed: lastReport.installed.includes(id)
+        ? lastReport.installed
+        : [...lastReport.installed, id],
+    };
+  }
+
+  /**
    * @param {object|null|undefined} requirements
    * @returns {Promise<CapabilityInstallReport>}
    */
@@ -216,5 +240,6 @@ export function createCapabilityRegistry({ catalog, adapter, strict = true } = {
     install,
     getReport,
     teardown,
+    noteExtensionCaps,
   };
 }

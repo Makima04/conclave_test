@@ -614,19 +614,22 @@ SillyTavern: { getContext: () => contextFactory.getContext() }
 
 | 字段 | P0（PR-04） | P2（PR-10，iframe 后充实） | 说明 |
 |------|-------------|---------------------------|------|
-| `chat` | **ready** — Session messages 的受控数组视图（live） | 同左 + 更接近 ST message 形状 | **PR-04 即 live**，非 PR-10 才有 |
-| `characters` | ready 最小：当前卡一项 | 可扩 | |
-| `name1` / `name2` | ready（user / char 名） | 同左 | |
-| `characterId` / `chatId` | ready 字符串/数字占位 | 对齐多会话 | |
-| `chatMetadata` | ready `{}` | 可持久化 | |
-| `eventSource` / `eventTypes` / `event_types` | ready → EventBus | 同左 | |
-| `addOneMessage` | ready → Session append + mount | 同左 | |
-| `generate` / `stopGeneration` | **stub**（warn + reject/no-op） | 可接真实生成 | |
-| `setExtensionPrompt` / `extensionPrompts` | **ready** 内存 map（供 Mind Port 适配，也可被 context 调用） | 同左 | |
-| `executeSlashCommandsWithOptions` | stub 委托 `slash.runtime` | 扩命令 | |
-| `SlashCommandParser` | stub 空解析器对象 | 真子集 | |
-| `variables.local` / `variables.global` | ready → SessionStore | 同左 | |
-| 其余 ST 大对象（tokenizers、ToolManager、Popup…） | **missing**（不出现在对象上） | 按扩展需要增量 | |
+| `chat` | **ready** — Session messages 的受控数组视图（live） | **ready** + ST 别名 `mes`/`is_user`/`is_system`/`send_date` | **PR-04 即 live**；PR-10 充实形状 |
+| `characters` | ready 最小：当前卡一项 | **ready**（name/avatar/chat） | |
+| `name1` / `name2` | ready（user / char 名） | **ready** | |
+| `characterId` / `chatId` | ready 字符串/数字占位 | **ready**（可 inject `getChatId`/`getCharacterId`） | 多会话对齐后续 |
+| `chatMetadata` | ready 每次 `{}` | **ready** session-live 可变对象 + `updateChatMetadata` | PR-10 可持久化（内存） |
+| `eventSource` / `eventTypes` / `event_types` | ready → EventBus | **ready** | |
+| `addOneMessage` | ready → Session append | **ready**（ST 形状） | |
+| `deleteLastMessage` / `getCurrentChatId` / `updateChatMetadata` | missing | **ready** 生成路径薄 helper | PR-10 增量 |
+| `generate` / `stopGeneration` | **stub**（warn + reject/no-op） | **wireable**（`generateFn`/`stopGenerationFn` + `isGenerating`） | 宿主注入后接真实生成；未绑定时仍 reject |
+| `setExtensionPrompt` / `extensionPrompts` | **ready** 内存 map（供 Mind Port 适配，也可被 context 调用） | **ready** | |
+| `executeSlashCommandsWithOptions` | stub 委托 `slash.runtime` | **ready** 子集（`/echo` + parser 注册 + 可 inject） | |
+| `SlashCommandParser` | stub 空解析器对象 | **ready** 子集（`addCommandObject`/`getCommands`/`parse` no-op） | |
+| `variables.local` / `variables.global` | ready → SessionStore | **ready** | |
+| 其余 ST 大对象（tokenizers、ToolManager、Popup…） | **missing**（不出现在对象上） | **missing**（按扩展需要增量） | |
+
+> **PR-10 进度：** 上表 P2 列已落地于 `ContextFactory.js`（导出 `CONTEXT_FIELD_MATRIX` 供测试/文档对齐）。`generate` 为 **wireable** 而非全量 LLM 接入（P4/PR-13）。
 
 ```javascript
 // ContextFactory — P0 即返回真实对象（字段按上表）
@@ -1385,7 +1388,7 @@ fn initial_game_state(card: &CardData) -> Value {
 |-------|------|----------|------------|
 | **P0** | 拆分 + SessionKernel + CapabilityRegistry + 去苍玄硬编码 + 边界 lint | 状态机切换卡；requirements→install；无内核 cangxuan 默认；eslint 边界生效；**目标** `main.js` 精简 bootstrap（可延后） | **主体完成**（01a–05）；`main.js` 仍为编排中枢（未压到 150 行） |
 | **P1** | FE test harness + Display RenderPipeline + MessageMount + chat 同步 | vitest golden；StatusPlaceHolder 预通道；N 轮后 TH/DOM/Session 一致 | **进行中**：05.5+06 完成；**PR-07 未做** |
-| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | **进行中**：PR-09 iframe+bridge+ADR ✅；PR-10 未做 |
+| **P2** | iframe + BridgeProtocol allowlist + getContext P2 字段 + ExtensionManager | 卡脚本仅 iframe；sandbox ADR；getContext ≠ TH | **进行中**：PR-09 iframe+bridge+ADR ✅；PR-10 getContext P2 + ExtensionManager 骨架 ✅ |
 | **P3** | Mind MVP | mock 下 `prompt_debug`+面板含 Mind 块；flag off 无回归 | 未开始 |
 | **P4** | 真 LLM / 多会话 / 任意扩展 / E2E | 真模型；E2E 卡集 | 未开始 |
 
@@ -1540,10 +1543,14 @@ G2 mind:    PR-01a → 02 → 04 → 05 → 07 → 11 → 12
 **落地：** `st-host/isolation/{BridgeProtocol,BridgeHost,CardFrame,GlobalAdapter IframeAdapter,flags}`；`main.js` 在 `card_iframe=1` 时将卡 HTML/脚本挂入 iframe，parent 保留 Host chrome；默认 off 零行为变化。  
 **验收：** 卡内 `getChatMessages` 经 bridge；parent 无卡 CSS 污染；默认 sandbox=`allow-scripts` 已记录。
 
-### PR-10 — getContext P2 字段 + ExtensionManager 骨架 · 🔲
+### PR-10 — getContext P2 字段 + ExtensionManager 骨架 · ✅
 **依赖：** PR-09  
 **描述：** 按 §5.1 矩阵把 stub 生成路径等补齐到 P2 ready 子集；本地扩展 manifest。  
-**验收：** 扩展 activate；context 字段表勾选完成。
+**落地：**
+- `st-host/context/ContextFactory.js` — P2 字段：`chatMetadata` live、`updateChatMetadata`/`deleteLastMessage`/`getCurrentChatId`、wireable `generate`/`stopGeneration`、`SlashCommandParser` 子集、`executeSlashCommandsWithOptions`（`/echo`+注册命令）、ST 消息别名；导出 `CONTEXT_FIELD_MATRIX`
+- `st-host/extensions/ExtensionManager.js` — 本地 manifest（name/loading_order/entry）、activate/deactivate、`requiresReload`、capability ids → Catalog.register + Registry.noteExtensionCaps
+- Catalog `register`/`unregister`；非完整 ST 扩展商店 / git install（P4）
+**验收：** 扩展 activate；context 字段表勾选完成（见 §5.1 矩阵 PR-10 进度）。
 
 ### PR-11 — Mind MVP（默认 flag off） · 🔲
 **依赖：** PR-07, PR-05（**不**强制 PR-06，但需 prompt_debug 后端；建议 07 后）  

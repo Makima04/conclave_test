@@ -415,6 +415,12 @@ export function createCapabilityCatalog({ adapter, surfaces = {} } = {}) {
   /** @type {Map<string, CapabilityDescriptor>} */
   const byId = new Map(descriptors.map((d) => [d.id, d]));
 
+  /**
+   * Track extension-registered ids so list() stays consistent.
+   * @type {Set<string>}
+   */
+  const extensionIds = new Set();
+
   return {
     alwaysInstallIds() {
       return [...ALWAYS_INSTALL_IDS];
@@ -430,7 +436,36 @@ export function createCapabilityCatalog({ adapter, surfaces = {} } = {}) {
      * @returns {CapabilityDescriptor[]}
      */
     list() {
-      return [...descriptors];
+      return [...byId.values()];
+    },
+    /**
+     * P2: ExtensionManager may register capability descriptors at activate time.
+     * Overwrites any existing descriptor with the same id.
+     * @param {CapabilityDescriptor} desc
+     */
+    register(desc) {
+      if (!desc || typeof desc !== 'object' || !desc.id) {
+        throw new Error('CapabilityCatalog.register: descriptor with id is required');
+      }
+      if (typeof desc.install !== 'function') {
+        throw new Error(`CapabilityCatalog.register: ${desc.id} needs install()`);
+      }
+      byId.set(desc.id, desc);
+      extensionIds.add(desc.id);
+      return desc;
+    },
+    /**
+     * Remove a dynamically registered capability (extension deactivate).
+     * Built-in seed descriptors are not removed.
+     * @param {string} id
+     * @returns {boolean}
+     */
+    unregister(id) {
+      const key = String(id || '');
+      if (!extensionIds.has(key)) return false;
+      byId.delete(key);
+      extensionIds.delete(key);
+      return true;
     },
   };
 }
